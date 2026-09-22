@@ -95,10 +95,14 @@ const styles = StyleSheet.create({
   },
   label: {
     ...Type.label,
+    fontSize: 18,
+    lineHeight: 24,
+  },
+  hint: {
+    ...Type.label,
     fontSize: 16,
     lineHeight: 22,
   },
-  hint: Type.small,
   track: {
     height: 8,
     borderRadius: Radius.pill,

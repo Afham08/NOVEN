@@ -20,13 +20,13 @@ export type ButtonProps = PressableProps & {
 };
 
 const SIZE_STYLES = {
-  large: { minHeight: 56, paddingHorizontal: Spacing.six, gap: Spacing.two },
-  medium: { minHeight: 48, paddingHorizontal: Spacing.five, gap: Spacing.two },
+  large: { minHeight: 60, paddingHorizontal: Spacing.six, gap: Spacing.two },
+  medium: { minHeight: 52, paddingHorizontal: Spacing.five, gap: Spacing.two },
 } as const;
 
 const LABEL_STYLES = {
-  large: { fontSize: 17, lineHeight: 24 },
-  medium: { fontSize: 16, lineHeight: 22 },
+  large: { fontSize: 19, lineHeight: 26 },
+  medium: { fontSize: 17, lineHeight: 24 },
 } as const;
 
 export function Button({

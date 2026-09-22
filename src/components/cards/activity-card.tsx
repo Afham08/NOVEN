@@ -48,7 +48,7 @@ export function ActivityCard({
         ) : null}
       </View>
       {rightLabel ? (
-        <Text style={[styles.rightLabel, { color: theme.textSecondary }]}>{rightLabel}</Text>
+        <Text style={[styles.rightLabel, { color: theme.accent }]}>{rightLabel}</Text>
       ) : null}
     </Pressable>
   );
@@ -74,11 +74,23 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: Spacing.half,
   },
-  title: Type.label,
-  description: Type.small,
-  rightLabel: {
-    ...Type.caption,
+  title: {
+    ...Type.label,
+    fontSize: 20,
+    lineHeight: 28,
+    fontWeight: '700',
+  },
+  description: {
+    ...Type.label,
+    fontSize: 16,
+    lineHeight: 24,
     fontWeight: '600',
+  },
+  rightLabel: {
+    ...Type.label,
+    fontSize: 16,
+    lineHeight: 24,
+    fontWeight: '700',
   },
   pressed: {
     opacity: 0.82,
