@@ -1,14 +1,18 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useState } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { useCallback, useEffect, useState } from 'react';
+import { PermissionsAndroid, Platform, StyleSheet, View } from 'react-native';
 
+import {
+  PoseTrackerView,
+  type PoseFrameEventPayload,
+} from '../../../modules/pose-tracker';
 import { Screen } from '@/components/layout/screen';
 import { CameraPlaceholder } from '@/components/session/camera-placeholder';
 import { SessionTimer } from '@/components/session/session-timer';
 import { Button } from '@/components/ui/button';
 import { Header } from '@/components/ui/header';
 import { StatusChip } from '@/components/ui/status-chip';
-import { Spacing } from '@/constants/theme';
+import { Radius, Spacing } from '@/constants/theme';
 import { getExerciseById } from '@/data/exercises';
 
 type SessionPhase = 'ready' | 'running' | 'paused';
@@ -20,12 +24,50 @@ export default function SessionScreen() {
 
   const [seconds, setSeconds] = useState(0);
   const [phase, setPhase] = useState<SessionPhase>('ready');
+  const [hasCameraPermission, setHasCameraPermission] = useState<boolean | null>(null);
 
   useEffect(() => {
     if (phase !== 'running') return;
     const interval = setInterval(() => setSeconds((s) => s + 1), 1000);
     return () => clearInterval(interval);
   }, [phase]);
+
+  const requestCameraPermission = useCallback(async () => {
+    if (Platform.OS !== 'android') {
+      setHasCameraPermission(false);
+      return;
+    }
+    try {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.CAMERA,
+        {
+          title: 'Camera access',
+          message: 'NOVEN uses the camera to track your movement during the session.',
+          buttonNeutral: 'Ask Me Later',
+          buttonNegative: 'Cancel',
+          buttonPositive: 'OK',
+        },
+      );
+      setHasCameraPermission(granted === PermissionsAndroid.RESULTS.GRANTED);
+    } catch {
+      setHasCameraPermission(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(requestCameraPermission, 0);
+    return () => clearTimeout(timer);
+  }, [requestCameraPermission]);
+
+  const handleFrame = useCallback(() => {}, []);
+
+  const handlePoseFrame = useCallback((event: { nativeEvent: PoseFrameEventPayload }) => {
+    const { timestampMs, presence, landmarks } = event.nativeEvent;
+    console.log(
+      '[session] onPoseFrame',
+      JSON.stringify({ timestampMs, presence, landmarkCount: landmarks.length }),
+    );
+  }, []);
 
   if (!exercise) {
     return (
@@ -50,10 +92,16 @@ export default function SessionScreen() {
   const timerRunning = phase === 'running';
 
   return (
-    <Screen>
+    <Screen contentStyle={styles.content}>
       <Header title={exercise.name} />
 
-      <CameraPlaceholder />
+      {hasCameraPermission ? (
+        <>
+          <PoseTrackerView style={styles.camera} onFrame={handleFrame} onPoseFrame={handlePoseFrame} />
+        </>
+      ) : (
+        <CameraPlaceholder />
+      )}
 
       <StatusChip label={statusLabel} tone={phase === 'ready' ? 'ready' : 'accent'} />
       <SessionTimer
@@ -87,6 +135,17 @@ export default function SessionScreen() {
 }
 
 const styles = StyleSheet.create({
+  content: {
+    gap: Spacing.three,
+    paddingVertical: Spacing.three,
+  },
+  camera: {
+    width: '100%',
+    aspectRatio: 1,
+    borderRadius: Radius.card,
+    overflow: 'hidden',
+    backgroundColor: '#202522',
+  },
   controlsRow: {
     flexDirection: 'row',
     gap: Spacing.three,
