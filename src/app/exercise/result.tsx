@@ -1,45 +1,27 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text } from 'react-native';
+import { StyleSheet, Text } from 'react-native';
 
-import { ScoreCard } from '@/components/cards/score-card';
 import { Screen } from '@/components/layout/screen';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Header } from '@/components/ui/header';
 import { InfoRow } from '@/components/ui/info-row';
-import { StatusChip } from '@/components/ui/status-chip';
 import { Spacing, Type } from '@/constants/theme';
 import { getExerciseById } from '@/data/exercises';
-import { useTheme } from '@/hooks/use-theme';
-import {
-  createMockAnalysisResult,
-  getPatientFacingMetrics,
-  MOCK_ANALYSIS_DELAY_MS,
-} from '@/services/analysis';
-import { saveSession } from '@/services/saved-sessions';
-
-type ResultPhase = 'analyzing' | 'result';
 
 export default function ResultScreen() {
-  const { id } = useLocalSearchParams<{ id?: string }>();
+  const { id, reps, duration, pace, range, consistency } = useLocalSearchParams<{
+    id?: string;
+    reps?: string;
+    duration?: string;
+    pace?: string;
+    range?: string;
+    consistency?: string;
+  }>();
   const router = useRouter();
-  const theme = useTheme();
   const exercise = getExerciseById(id);
 
-  const [phase, setPhase] = useState<ResultPhase>('analyzing');
-  const [saved, setSaved] = useState(false);
-
-  // MOCK analysis — runs once on mount after a short simulated delay.
-  useEffect(() => {
-    if (!exercise) return;
-    const timeout = setTimeout(() => setPhase('result'), MOCK_ANALYSIS_DELAY_MS);
-    return () => clearTimeout(timeout);
-  }, [exercise]);
-
-  const analysis = useMemo(() => (exercise ? createMockAnalysisResult(exercise) : null), [exercise]);
-
-  if (!exercise || !analysis) {
+  if (!exercise || !reps) {
     return (
       <Screen>
         <Header title="Result not available" />
@@ -48,75 +30,48 @@ export default function ResultScreen() {
     );
   }
 
-  if (phase === 'analyzing') {
-    return (
-      <Screen>
-        <Header title="Session Complete" />
-        <Card variant="surface" gap={Spacing.five} style={styles.analyzingCard}>
-          <ActivityIndicator size="large" color={theme.accentSecondary} />
-          <Text style={[styles.analyzingHint, { color: theme.textSecondary }]}>
-            Preparing your result…
-          </Text>
-        </Card>
-      </Screen>
-    );
-  }
-
-  const metrics = getPatientFacingMetrics(analysis);
-
-  const handleSave = () => {
-    if (saved) return;
-    saveSession(analysis);
-    setSaved(true);
-  };
+  const repCount = Number(reps);
 
   return (
     <Screen>
       <Header title="Session Complete" />
 
-      <ScoreCard
-        variant="inverse"
-        score={analysis.score}
-        max={100}
-        label="Your score"
-        hint="out of 100"
-      />
-
-      <Text style={[styles.summary, { color: theme.heading }]}>{analysis.summary}</Text>
-      <StatusChip label="Demo result" tone="accent" />
+      <Card variant="inverse" gap={Spacing.one} style={styles.hero}>
+        <Text style={[styles.heroNumber, { color: '#F58A5F' }]}>{repCount}</Text>
+        <Text style={[styles.heroLabel, { color: 'rgba(250, 249, 246, 0.7)' }]}>
+          {repCount === 1 ? 'rep' : 'reps'} completed
+        </Text>
+      </Card>
 
       <Card variant="surface" gap={Spacing.three}>
-        {metrics.map((metric) => (
-          <InfoRow key={metric.label} label={metric.label} value={metric.value} />
-        ))}
+        <InfoRow label="Duration" value={duration ?? '--'} />
+        <InfoRow label="Pace" value={pace ?? '--'} />
+        <InfoRow label="Knee range" value={range ?? '--'} />
+        <InfoRow label="Consistency" value={consistency ?? '--'} />
       </Card>
 
       <Button variant="primary" title="Done" onPress={() => router.replace('/exercise')} />
-      <Button
-        variant="outline"
-        title={saved ? 'Saved' : 'Save session'}
-        disabled={saved}
-        onPress={handleSave}
-      />
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  analyzingCard: {
+  hero: {
     alignItems: 'center',
+    paddingVertical: Spacing.six,
   },
-  analyzingHint: {
-    ...Type.body,
-    fontSize: 17,
-    lineHeight: 26,
-    textAlign: 'center',
-  },
-  summary: {
-    ...Type.label,
-    fontSize: 28,
-    lineHeight: 36,
+  heroNumber: {
+    ...Type.headingLarge,
+    fontSize: 48,
+    lineHeight: 56,
     fontWeight: '800',
-    textAlign: 'center',
+    fontVariant: ['tabular-nums'],
+  },
+  heroLabel: {
+    ...Type.label,
+    fontSize: 18,
+    lineHeight: 26,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
 });
