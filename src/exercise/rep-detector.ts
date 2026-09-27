@@ -41,8 +41,71 @@ export class RepDetector {
    * threshold change — every threshold keeps its value.
    */
   private armed = false;
+  /**
+   * Consecutive-ish straight frames seen during the CURRENT extension attempt,
+   * used to commit `extending` -> `extended` once `holdFrames` are reached.
+   *
+   * WHY A DEAD-BAND FRAME NO LONGER WIPES IT — the missed-rep bug
+   * -----------------------------------------------------------
+   * This used to be reset to 0 by any frame in the dead band between
+   * `bentAngleDeg` and `extendedAngleDeg`, so committing to `extended` demanded
+   * `holdFrames` STRICTLY CONSECUTIVE frames at or above `extendedAngleDeg`.
+   *
+   * Both thresholds are absolutes, and the config explicitly does not require the
+   * knee to lock ("the knee does not need to lock at a perfect 180deg"). A knee
+   * that only reaches ~162-165deg therefore produces a plateau sitting right on
+   * the `extendedAngleDeg` boundary. Pose-model jitter across that boundary then
+   * yields frames like 163, 158, 159, 166, 157 — never two consecutive frames at
+   * or above the threshold — so the machine never reached `extended` at all. The
+   * following descent below `bentAngleDeg` then hit the false-start branch, which
+   * calls `resetCycle()` and throws away `cycleMin`/`cycleMax`. The rep was lost
+   * completely, with no partial credit and nothing in the diagnostics to show a
+   * near miss. Reproduced deterministically; a 2-degree plateau one notch higher
+   * (168) counted fine, which is what isolated the boundary rather than the
+   * jitter magnitude.
+   *
+   * The fix keeps the counter across intermediate frames instead of resetting it.
+   * Every threshold keeps its value, `holdFrames` qualifying straight frames are
+   * still required, and a genuine abort (a frame at or below `bentAngleDeg`)
+   * still resets the whole cycle through the branch above. This is a
+   * state-machine correction, not a loosened band.
+   */
   private extendedHold = 0;
   private returningHold = 0;
+  /**
+   * Frames at or below `bentAngleDeg` seen during the CURRENT return, committing
+   * the rep once `holdFrames` are reached.
+   *
+   * WHY A DEAD-BAND FRAME NO LONGER WIPES IT — the mirror of the extension bug
+   * ------------------------------------------------------------------------
+   * This used to be reset to 0 by any frame between `bentAngleDeg` and
+   * `extendedAngleDeg`, so completing a rep demanded `holdFrames` STRICTLY
+   * CONSECUTIVE frames at or below `bentAngleDeg`.
+   *
+   * The bottom of a descent is a SUSTAINED posture, so this usually worked: a
+   * seated knee at 90-120deg produces a long run of qualifying frames. It failed
+   * when the person's resting knee angle settles within a few degrees of
+   * `bentAngleDeg` itself, which is a real seated posture (a moderately open
+   * knee, feet forward). The pose estimate then jitters across 140deg, and
+   * unless two consecutive frames happened to land on the same side of it the
+   * rep was never completed — even though the leg had plainly travelled from
+   * ~170deg down to ~139deg and stayed there. Reproduced deterministically; the
+   * identical descent that continued to 90deg or 120deg counted fine, which is
+   * what isolated the resting angle rather than the descent.
+   *
+   * Because the qualifying frames are then scattered rather than adjacent, the
+   * failure is luck-dependent, which is what made it occasional rather than
+   * constant.
+   *
+   * WHY THIS CANNOT MANUFACTURE A REP
+   * `returning` is unreachable without a real extension (see `extended`), the
+   * bounce-back branch above is evaluated first and still resets the counter and
+   * sends a rebounding leg back to `extended`, `holdFrames` qualifying frames
+   * are still required, and the range, cooldown, readiness-gate and
+   * resting-posture guards are all outside this state machine. Preserving the
+   * counter relaxes only the ADJACENCY of the two rest frames, not their
+   * number, not the extension that preceded them, and not any threshold.
+   */
   private restHold = 0;
   private cycleMin: number | null = null;
   private cycleMax: number | null = null;
@@ -62,13 +125,11 @@ export class RepDetector {
     return this.armed;
   }
 
-  // TEMPORARY DIAGNOSTIC ACCESSORS — remove with src/exercise/pose-diagnostics.ts
-  // after the physical-device retest. Read-only; the pipeline does not use these.
-  /** Lowest / highest angle seen since the current cycle began. */
-  get cycleBounds(): { min: number | null; max: number | null } {
-    return { min: this.cycleMin, max: this.cycleMax };
-  }
-
+  /**
+   * Read-only views of the machine's own bookkeeping. The pipeline never reads
+   * these; they are the inspection surface the detector's tests assert against
+   * (phase transitions, arming, and the ranges of completed reps).
+   */
   get completedReps(): number {
     return this.reps;
   }
@@ -179,9 +240,10 @@ export class RepDetector {
           // Fell back to rest without ever reaching extension: false start.
           this.phase = 'rest';
           this.resetCycle();
-        } else {
-          this.extendedHold = 0;
         }
+        // A frame strictly BETWEEN the two bands is intermediate progress. It
+        // neither confirms nor denies extension, and the accumulated hold is
+        // deliberately KEPT — see the note on `extendedHold` above.
         break;
 
       case 'extended':
@@ -208,9 +270,10 @@ export class RepDetector {
           if (this.restHold >= holdFrames) {
             return this.completeRep(timestampMs);
           }
-        } else {
-          this.restHold = 0;
         }
+        // As in `extending`, a frame strictly BETWEEN the bands is intermediate
+        // progress and deliberately does NOT wipe the accumulated hold.
+        // See the note on `restHold` above.
         break;
     }
 

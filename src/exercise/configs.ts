@@ -70,5 +70,13 @@ export const SEATED_KNEE_EXTENSION: ExerciseConfig = {
      * standing up, walking up to the phone — that never trips the per-frame
      * drift limit. Wide enough to absorb normal seated postural shifting. */
     maxAnchorOffset: 0.12,
+    /**
+     * This exercise counts from a SEATED, bent-knee posture, so counting may only
+     * begin once a tracked knee is actually bent (at or below `bentAngleDeg`
+     * above). Without this, a person who never sat down was granted counting with
+     * a straight leg, and an ordinary standing weight shift — bend, straighten,
+     * bend — was scored as a rep. Reuses `bentAngleDeg`; adds no new threshold.
+     */
+    requireRestingPosture: true,
   },
 };

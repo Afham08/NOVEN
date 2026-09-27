@@ -74,14 +74,6 @@ export class ReadinessGate {
     return this.baseline;
   }
 
-  // TEMPORARY DIAGNOSTIC — remove with src/exercise/pose-diagnostics.ts after the
-  // physical-device retest. Read-only view of the value that drops readiness, so
-  // the log can show HOW FAR the hips were from the anchor when the gate let a
-  // frame through. Callers must not branch on this.
-  get anchorOffsetFromAnchor(): number | null {
-    return this.previous === null ? null : this.anchorOffset(this.previous);
-  }
-
   /** Restarts the full gate (session start). */
   reset(): void {
     this.dropToWaiting();

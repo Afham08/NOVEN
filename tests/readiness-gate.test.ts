@@ -21,6 +21,9 @@ const THRESHOLDS: ReadinessConfig & RepThresholds = {
   anchorDriftSuspendFrames: 2,
   maxAnchorOffset: 0.12,
   maxFrameGapMs: 1000,
+  // This suite drives ReadinessGate directly, which has no posture opinion of
+  // its own; the resting-posture rule is enforced by SessionEngine, not here.
+  requireRestingPosture: true,
 };
 
 const READINESS: ReadinessConfig = {
@@ -31,6 +34,7 @@ const READINESS: ReadinessConfig = {
   maxAnchorDrift: 0.04,
   anchorDriftSuspendFrames: 2,
   maxAnchorOffset: 0.12,
+  requireRestingPosture: true,
 };
 
 const REQUIRED_JOINTS: PoseLandmarkName[] = [

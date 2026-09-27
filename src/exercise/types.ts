@@ -71,6 +71,39 @@ export type ReadinessConfig = {
    * `maxAnchorDrift` on any single frame. Generous enough to allow the small
    * postural shifts of a genuine seated rep. */
   maxAnchorOffset: number;
+  /**
+   * Whether counting may only begin once the tracked joints are actually inside
+   * the exercise's REST regime, i.e. at least one tracked side's joint angle is
+   * at or below `RepThresholds.bentAngleDeg` — the boundary this config already
+   * defines as "bent / at rest". No new number is introduced: it reuses
+   * `bentAngleDeg` as the definition of the starting posture.
+   *
+   * WHY THIS EXISTS — "standing still counted a rep"
+   * -----------------------------------------------
+   * A rep cycle is defined purely by ABSOLUTE angle bands, so any movement that
+   * carries a joint from bent to straight and back to bent is indistinguishable
+   * from an exercise rep. That is fine while the person is in the posture the
+   * exercise is defined from, but the stillness gate cannot tell postures apart:
+   * standing is still, and standing is hip-stable, so a person who never sat
+   * down was granted counting with a knee angle of ~174deg.
+   *
+   * A standing person then shifts their weight — an ordinary, non-exercise
+   * movement in which the knee genuinely bends past 140deg and straightens
+   * again. The `armed` precondition does not and cannot stop this: 130deg really
+   * is a bent knee, so arming is the correct response to it. The machine then
+   * observes the textbook `bent -> extended -> bent` cycle and counts a rep that
+   * was never an exercise movement. Reproduced deterministically at range 44deg
+   * and 54deg, with the gate READY and the hips at anchorOffset 0.000 throughout.
+   *
+   * Requiring the starting posture at the moment counting is granted separates
+   * the two cases on the one axis that actually differs: a seated exerciser is
+   * bent at rest, a standing bystander is not.
+   *
+   * It is evaluated ONLY on the frame readiness is granted, never continuously:
+   * a genuine rep deliberately leaves the rest regime (the knee extends past
+   * 160deg), so checking it per-frame would suppress every real repetition.
+   */
+  requireRestingPosture: boolean;
 };
 
 /** Complete static definition of an exercise for the tracker engine. */

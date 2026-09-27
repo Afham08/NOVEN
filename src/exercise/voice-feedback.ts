@@ -28,7 +28,7 @@
  *     update can therefore never invent a rep announcement.
  */
 
-import { completedFeedback, type FeedbackCue, type FeedbackKind } from './feedback';
+import type { FeedbackCue, FeedbackKind } from './feedback';
 
 /** Higher priority may cut off lower priority speech. */
 export type SpeechPriority = 'low' | 'normal' | 'high';
@@ -398,5 +398,3 @@ export function createExpoSpeechSink(): SpeechSink {
     },
   };
 }
-
-export { completedFeedback };
