@@ -43,5 +43,32 @@ export const SEATED_KNEE_EXTENSION: ExerciseConfig = {
     holdFrames: 2,
     /** Landmarks below this visibility are ignored for distance metrics. */
     minVisibility: 0.4,
+    /**
+     * Pose frames arrive every ~33-100ms while tracking is healthy. Anything
+     * beyond 1s is a tracking stall, not movement, so a rep cycle interrupted
+     * by one is discarded instead of being completed by frames either side of
+     * the gap. Deliberately far above the healthy inter-frame time so ordinary
+     * frame jitter on a slow device can never trip it.
+     */
+    maxFrameGapMs: 1000,
+  },
+  readiness: {
+    /** Joints must be at least this visible for the gate to count them. */
+    minVisibility: 0.4,
+    /** Max normalized drift per tracked joint between frames while "still". */
+    maxStableDrift: 0.03,
+    /** Consecutive calm frames required before counting is enabled. */
+    minStableFrames: 10,
+    /** Minimum continuous calm tracking (ms) before counting is enabled. */
+    minStableMs: 1000,
+    /** Max per-frame (normalized) shift of the hip anchor while counting. */
+    maxAnchorDrift: 0.04,
+    /** Consecutive drifting frames before counting is suspended. */
+    anchorDriftSuspendFrames: 2,
+    /** Max distance (normalized) the hips may travel from the resting anchor
+     * before counting is suspended. Catches slow relocation — sitting down,
+     * standing up, walking up to the phone — that never trips the per-frame
+     * drift limit. Wide enough to absorb normal seated postural shifting. */
+    maxAnchorOffset: 0.12,
   },
 };

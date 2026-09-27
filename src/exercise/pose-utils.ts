@@ -18,10 +18,21 @@ export function getLandmark(
 
 /**
  * Interior angle (degrees, 0..180) at vertex `b` formed by points a–b–c,
- * computed in 2D using normalized x/y coordinates. NaN when a vertex is missing.
+ * computed in 2D using normalized x/y coordinates.
+ *
+ * Returns NaN when a vertex is missing OR when any coordinate is not finite.
+ * The finite check is load-bearing: IEEE propagation already turns a NaN
+ * coordinate into NaN, but an Infinity coordinate collapses to a plausible
+ * looking finite angle (atan2 clamps it to ±90 deg), which would let a corrupt
+ * model frame pose as a real knee angle and drive the rep machine. NaN is
+ * rejected downstream by RepDetector and the readiness gate, so failing here
+ * keeps garbage out of the rep cycle and out of the knee-range metric.
  */
 export function calculateAngle(a: Point2D, b: Point2D, c: Point2D): number {
   if (!a || !b || !c) return Number.NaN;
+  if (!Number.isFinite(a.x) || !Number.isFinite(a.y)) return Number.NaN;
+  if (!Number.isFinite(b.x) || !Number.isFinite(b.y)) return Number.NaN;
+  if (!Number.isFinite(c.x) || !Number.isFinite(c.y)) return Number.NaN;
 
   const radAnglePq =
     Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);

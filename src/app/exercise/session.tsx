@@ -15,10 +15,10 @@ import { StatusChip } from '@/components/ui/status-chip';
 import { Radius, Spacing, Type } from '@/constants/theme';
 import { getExerciseById } from '@/data/exercises';
 import { SEATED_KNEE_EXTENSION } from '@/exercise/configs';
-import { phaseFeedback, presenceFeedback, priorityPhase, type FeedbackCue } from '@/exercise/feedback';
+import { completedFeedback, pausedFeedback, setupFeedback, type FeedbackCue } from '@/exercise/feedback';
 import { buildSessionMetrics, formatConsistencyLabel, formatDurationLabel, formatPaceLabel, formatRangeLabel } from '@/exercise/metrics';
-import { angleFromTriplet } from '@/exercise/pose-utils';
-import { RepDetector } from '@/exercise/rep-detector';
+import { SessionEngine } from '@/exercise/session-engine';
+import { createExpoSpeechSink, VoiceFeedbackController } from '@/exercise/voice-feedback';
 
 type SessionPhase = 'ready' | 'running' | 'paused' | 'completed';
 
@@ -37,23 +37,79 @@ export default function SessionScreen() {
   const [hasCameraPermission, setHasCameraPermission] = useState<boolean | null>(null);
   const [hud, setHud] = useState<HudState>({
     reps: 0,
-    feedback: { text: 'Ready', tone: 'ready' },
+    feedback: setupFeedback(),
   });
 
   const phaseRef = useRef<SessionPhase>('ready');
-  useEffect(() => {
-    phaseRef.current = phase;
-  }, [phase]);
+  const secondsRef = useRef(0);
 
-  const leftDetectorRef = useRef<RepDetector | null>(null);
-  const rightDetectorRef = useRef<RepDetector | null>(null);
-  const rangeRef = useRef<{ min: number; max: number } | null>(null);
-  if (leftDetectorRef.current === null) leftDetectorRef.current = new RepDetector(SEATED_KNEE_EXTENSION.thresholds);
-  if (rightDetectorRef.current === null) rightDetectorRef.current = new RepDetector(SEATED_KNEE_EXTENSION.thresholds);
+  /**
+   * Phase is mirrored into a ref because `onPoseFrame` fires ~10x/s from the
+   * native view and must never depend on a render having committed. The ref is
+   * written synchronously here (NOT in an effect) so a pose frame arriving
+   * between the tap and the next commit is attributed to the phase the user
+   * just entered, instead of the previous one.
+   */
+  const goToPhase = useCallback((next: SessionPhase) => {
+    phaseRef.current = next;
+    setPhase(next);
+  }, []);
+
+  /**
+   * The whole per-frame exercise pipeline lives in SessionEngine (pure, and unit
+   * tested); this screen only owns the session phase, the camera, and the HUD.
+   */
+  const engineRef = useRef<SessionEngine | null>(null);
+  if (engineRef.current === null) engineRef.current = new SessionEngine(SEATED_KNEE_EXTENSION);
+
+  /**
+   * Voice is a second channel for the SAME per-frame decision the HUD renders,
+   * not a parallel state machine: both read `SessionFrameResult`. All throttling
+   * lives inside the controller, so it is safe to hand it every frame — it speaks
+   * only on a genuine state change or on a rep the detector actually completed.
+   *
+   * The controller is created and torn down by the effect below and reached only
+   * through the ref from callbacks. That keeps it off the render path (a ref read
+   * during render is a React Compiler error) and means a late native callback can
+   * never speak into a screen that has already navigated away: after unmount the
+   * ref is null and the controller it pointed at is disposed.
+   */
+  const voiceRef = useRef<VoiceFeedbackController | null>(null);
+
+  useEffect(() => {
+    const voice = new VoiceFeedbackController(createExpoSpeechSink());
+    voiceRef.current = voice;
+    // Spoken once on open, while the user is still beside the phone and can act
+    // on it. This is the only place the setup copy is spoken.
+    voice.announceSetup();
+    return () => {
+      voice.dispose();
+      if (voiceRef.current === voice) voiceRef.current = null;
+    };
+  }, []);
+
+  /**
+   * Leaving a finished session is one-shot. Without this a double tap on Done
+   * fires replace() twice, stacking a second /exercise entry the user could Back
+   * into. The ref flips before the navigation call so re-entrant presses in the
+   * same frame are ignored.
+   */
+  const leavingRef = useRef(false);
+  const leaveSession = () => {
+    if (leavingRef.current) return;
+    leavingRef.current = true;
+    router.replace('/exercise');
+  };
 
   useEffect(() => {
     if (phase !== 'running') return;
-    const interval = setInterval(() => setSeconds((s) => s + 1), 1000);
+    const interval = setInterval(() => {
+      setSeconds((s) => {
+        const next = s + 1;
+        secondsRef.current = next;
+        return next;
+      });
+    }, 1000);
     return () => clearInterval(interval);
   }, [phase]);
 
@@ -84,57 +140,38 @@ export default function SessionScreen() {
     return () => clearTimeout(timer);
   }, [requestCameraPermission]);
 
-  const updateHud = useCallback((reps: number, feedback: FeedbackCue) => {
+  const updateHud = useCallback((next: { reps: number; feedback: FeedbackCue }) => {
     setHud((prev) =>
-      prev.reps === reps && prev.feedback.text === feedback.text && prev.feedback.tone === feedback.tone
+      prev.reps === next.reps && prev.feedback.text === next.feedback.text && prev.feedback.tone === next.feedback.tone
         ? prev
-        : { reps, feedback },
+        : { reps: next.reps, feedback: next.feedback },
     );
   }, []);
 
+  /**
+   * The pose-tracker view also emits a low-level `onFrame` camera event that
+   * NOVEN has no consumer for — all exercise logic runs off `onPoseFrame`.
+   * The prop is still declared required by PoseTrackerViewProps, so an inert
+   * handler is passed rather than omitting it (dropping the listener would need
+   * a device to confirm the native dispatcher tolerates it). This is the only
+   * reason `onFrame` exists here.
+   */
   const handleFrame = useCallback(() => {}, []);
 
   const handlePoseFrame = useCallback(
     (event: { nativeEvent: PoseFrameEventPayload }) => {
-      const { timestampMs, presence, landmarks } = event.nativeEvent;
-      console.log(
-        '[session] onPoseFrame',
-        JSON.stringify({ timestampMs, presence, landmarkCount: landmarks.length }),
-      );
-
+      // Phase is mirrored into a ref because `onPoseFrame` fires ~10x/s from the
+      // native view and must never depend on a render having committed. Frames
+      // that arrive while paused, before Start, or after End are dropped here and
+      // never reach the engine, so a late frame cannot revive a finished session.
       if (phaseRef.current !== 'running') return;
-
-      const left = leftDetectorRef.current;
-      const right = rightDetectorRef.current;
-      if (!left || !right) return;
-
-      if (presence !== 'tracked') {
-        updateHud(hudRefReps(left, right), presenceFeedback(presence));
-        return;
-      }
-
-      let repCompletedThisFrame = false;
-      for (const side of SEATED_KNEE_EXTENSION.sides) {
-        const detector = side === 'left' ? left : right;
-        const angle = angleFromTriplet(
-          landmarks,
-          SEATED_KNEE_EXTENSION.triplets[side],
-          SEATED_KNEE_EXTENSION.thresholds.minVisibility,
-        );
-        if (!Number.isFinite(angle)) continue;
-
-        const current = rangeRef.current;
-        rangeRef.current = current
-          ? { min: Math.min(current.min, angle), max: Math.max(current.max, angle) }
-          : { min: angle, max: angle };
-
-        const outcome = detector.process({ angle, timestampMs });
-        if (outcome.repCompleted) repCompletedThisFrame = true;
-      }
-
-      const phase = priorityPhase(left.currentPhase, right.currentPhase);
-      const feedback = phaseFeedback(phase, repCompletedThisFrame);
-      updateHud(hudRefReps(left, right), feedback);
+      const engine = engineRef.current;
+      if (!engine) return;
+      const result = engine.handlePoseFrame(event);
+      updateHud(result);
+      // Speech is handed the engine's own decision rather than the rendered HUD
+      // value, and the controller decides whether that decision is worth saying.
+      voiceRef.current?.onFrame(result);
     },
     [updateHud],
   );
@@ -149,32 +186,63 @@ export default function SessionScreen() {
   }
 
   const start = () => {
-    leftDetectorRef.current?.reset();
-    rightDetectorRef.current?.reset();
-    rangeRef.current = null;
+    engineRef.current?.reset();
+    // Clear any throttling left over from a previous attempt so the first cue of
+    // the new session is not swallowed by a cooldown.
+    voiceRef.current?.reset();
+    secondsRef.current = 0;
     setSeconds(0);
-    setHud({ reps: 0, feedback: { text: 'Ready', tone: 'ready' } });
-    setPhase('running');
+    setHud({ reps: 0, feedback: setupFeedback() });
+    goToPhase('running');
+    voiceRef.current?.announceStart();
   };
 
-  const pause = () => setPhase('paused');
-  const resume = () => setPhase('running');
+  const pause = () => {
+    // Freeze the in-progress rep cycle so the movement that caused the pause
+    // cannot be completed by the frames that follow it. Counted reps survive.
+    // The HUD is not updated while paused (no pose frames are consumed), so the
+    // engine also releases any held praise here instead of leaving it on screen.
+    const engine = engineRef.current;
+    if (engine) updateHud(engine.pause());
+    goToPhase('paused');
+    voiceRef.current?.announcePause();
+  };
+
+  const resume = () => {
+    // The readiness gate is deliberately NOT reset: re-settling after every
+    // pause would be needlessly strict. Its per-frame anchor drift and
+    // baseline-offset checks already reject repositioning done while paused,
+    // because the pre-pause reference frame is still the drift comparison base.
+    goToPhase('running');
+    voiceRef.current?.announceResume();
+  };
 
   const end = () => {
-    const left = leftDetectorRef.current;
-    const right = rightDetectorRef.current;
-    const totalReps = (left?.completedReps ?? 0) + (right?.completedReps ?? 0);
-    const repRanges = [...(left?.completedRanges ?? []), ...(right?.completedRanges ?? [])];
+    // COMPLETED is terminal: a second End (double tap, or back-navigation from
+    // the result screen) must not push a duplicate result or re-open counting.
+    if (phaseRef.current === 'completed') return;
+
+    const engine = engineRef.current;
+    const range = engine?.observedRange ?? null;
 
     const metrics = buildSessionMetrics({
-      reps: totalReps,
-      durationSeconds: seconds,
-      repRanges,
-      rangeMinDeg: rangeRef.current?.min ?? null,
-      rangeMaxDeg: rangeRef.current?.max ?? null,
+      reps: engine?.reps ?? 0,
+      // Read the ref, not the render closure: `seconds` can be up to one tick
+      // stale at the instant End is pressed, which would under-report duration.
+      durationSeconds: secondsRef.current,
+      repRanges: engine?.repRanges ?? [],
+      rangeMinDeg: range?.min ?? null,
+      rangeMaxDeg: range?.max ?? null,
     });
 
-    setPhase('completed');
+    // Stop counting and freeze the final numbers before navigating away, so no
+    // pose frame can mutate the metrics that were just handed to the result.
+    engine?.end();
+    goToPhase('completed');
+    // Announced before navigating. The controller is terminal from here, so this
+    // is the last thing ever spoken for this session.
+    voiceRef.current?.announceCompletion(metrics.reps);
+
     router.push({
       pathname: '/exercise/result',
       params: {
@@ -188,9 +256,30 @@ export default function SessionScreen() {
     });
   };
 
-  const chipLabel = phase === 'ready' ? 'Ready' : phase === 'running' ? 'Session in progress' : 'Paused';
-  const chipTone = phase === 'ready' ? 'ready' : 'accent';
+  const chipLabel =
+    phase === 'ready'
+      ? 'Ready'
+      : phase === 'running'
+        ? 'Session in progress'
+        : phase === 'paused'
+          ? 'Paused'
+          : 'Session complete';
+  const chipTone = phase === 'ready' || phase === 'completed' ? 'ready' : 'accent';
   const timerRunning = phase === 'running';
+
+  // The HUD states the phase in words rather than relying on the chip, a colour,
+  // or the timer — none of which are readable from across a room.
+  const phaseBanner =
+    phase === 'paused' ? 'PAUSED' : phase === 'completed' ? 'SESSION COMPLETE' : null;
+
+  // Paused and completed get fixed wording so a stale exercise cue can never be
+  // left standing on screen; while running, the engine's own cue is the truth.
+  const instructionText =
+    phase === 'completed'
+      ? completedFeedback().text
+      : phase === 'paused'
+        ? pausedFeedback().text
+        : hud.feedback.text;
 
   return (
     <Screen contentStyle={styles.content}>
@@ -198,19 +287,67 @@ export default function SessionScreen() {
 
       {hasCameraPermission ? (
         <View style={styles.cameraFrame}>
-          <PoseTrackerView
-            style={styles.camera}
-            onFrame={handleFrame}
-            onPoseFrame={handlePoseFrame}
-          />
-          {phase !== 'ready' ? (
-            <View pointerEvents="none" style={styles.hudOverlay}>
-              <Text style={styles.hudReps}>Reps {hud.reps}</Text>
-              <Text numberOfLines={1} style={styles.hudFeedback}>
-                {hud.feedback.text}
-              </Text>
-            </View>
-          ) : null}
+          {/*
+            The tracker is unmounted once the session is over. The result screen
+            is PUSHED, so this screen stays mounted behind it — and the native
+            module only releases the camera / stops MediaPipe inference from
+            OnViewDestroys, i.e. on a real unmount. Leaving the tracker mounted
+            would keep the camera indicator lit and burn CPU on pose inference
+            for the whole time the result screen is open. The 1:1 frame and the
+            rest of the live-session layout are untouched; only the overlay drawn
+            on top of the preview changed, to make it readable from a distance.
+          */}
+          {phase === 'completed' ? null : (
+            <PoseTrackerView
+              style={styles.camera}
+              onFrame={handleFrame}
+              onPoseFrame={handlePoseFrame}
+            />
+          )}
+          <View
+            pointerEvents="none"
+            style={[styles.hudOverlay, phase === 'ready' ? styles.hudOverlayCentered : null]}>
+            {/*
+              Distance-readable HUD.
+
+              The user is several feet from the phone with the screen facing away
+              or at an angle, so the running state leads with a single dominant
+              number and one short imperative underneath. Everything here is
+              derived from the same `hud` state the engine produced this frame —
+              there is no second source of truth.
+
+              Contrast is carried by a solid scrim plus warm-white text rather than
+              colour, so the HUD stays legible over any camera content and never
+              depends on colour alone. `allowsFontScaling` is left on deliberately:
+              enlarging the text is a feature for this audience.
+            */}
+            {phase === 'ready' ? (
+              <View style={styles.readyPanel}>
+                <Text style={styles.readyTitle}>GET READY</Text>
+                <Text style={styles.readyLine}>Sit sideways to the camera</Text>
+                <Text style={styles.readyHint}>
+                  Keep your full upper body and legs visible
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.runPanel}>
+                {phaseBanner ? (
+                  <Text accessibilityRole="header" style={styles.phaseBanner}>
+                    {phaseBanner}
+                  </Text>
+                ) : null}
+                <Text style={styles.repsLabel}>REPS</Text>
+                <Text
+                  accessibilityLabel={`${hud.reps} ${hud.reps === 1 ? 'rep' : 'reps'}`}
+                  style={styles.repsValue}>
+                  {hud.reps}
+                </Text>
+                <Text numberOfLines={2} style={styles.instruction}>
+                  {instructionText}
+                </Text>
+              </View>
+            )}
+          </View>
         </View>
       ) : (
         <CameraPlaceholder />
@@ -223,8 +360,25 @@ export default function SessionScreen() {
         suggestedSeconds={exercise.durationSeconds}
       />
 
-      {phase === 'ready' ? (
-        <Button variant="primary" title="Start" onPress={start} />
+      {/*
+        A completed session is terminal: the frozen metrics were already handed
+        to the pushed result screen, so Pause/Resume must not be offered here or
+        back-navigation could restart the timer and re-open counting. The result
+        screen is pushed rather than replaced, so this screen remains reachable
+        by pressing Back — it therefore needs its own way out, mirroring the
+        result screen's Done button, instead of being a dead end.
+      */}
+      {phase === 'completed' ? (
+        <Button variant="primary" title="Done" onPress={leaveSession} />
+      ) : phase === 'ready' ? (
+        // Start is only offered once the camera is actually available. Without
+        // it there are no pose frames, so a session could be "completed" with 0
+        // reps and report success for a workout that was never tracked. While
+        // permission is pending or denied the CameraPlaceholder above already
+        // explains what is needed.
+        hasCameraPermission ? (
+          <Button variant="primary" title="Start" onPress={start} />
+        ) : null
       ) : (
         <View style={styles.controlsRow}>
           <Button
@@ -245,11 +399,6 @@ export default function SessionScreen() {
       )}
     </Screen>
   );
-}
-
-/** Reads rep counts out of the two detectors (used from both pose callbacks). */
-function hudRefReps(left: RepDetector, right: RepDetector): number {
-  return left.completedReps + right.completedReps;
 }
 
 const styles = StyleSheet.create({
@@ -275,31 +424,86 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
+    top: 0,
     bottom: 0,
-    flexDirection: 'row',
+    justifyContent: 'flex-end',
+  },
+  hudOverlayCentered: {
+    justifyContent: 'center',
+  },
+  readyPanel: {
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: Spacing.three,
+    gap: Spacing.two,
+    margin: Spacing.four,
+    paddingVertical: Spacing.five,
+    paddingHorizontal: Spacing.six,
+    borderRadius: Radius.card,
+    backgroundColor: 'rgba(18, 20, 19, 0.74)',
+  },
+  readyTitle: {
+    ...Type.heading,
+    fontSize: 40,
+    lineHeight: 48,
+    fontWeight: '800',
+    color: '#FAF9F6',
+    textAlign: 'center',
+    letterSpacing: 1,
+  },
+  readyLine: {
+    ...Type.bodyEmphasis,
+    fontSize: 24,
+    lineHeight: 32,
+    fontWeight: '700',
+    color: '#FAF9F6',
+    textAlign: 'center',
+  },
+  readyHint: {
+    ...Type.body,
+    fontSize: 19,
+    lineHeight: 26,
+    fontWeight: '500',
+    color: '#E7EFEB',
+    textAlign: 'center',
+  },
+  runPanel: {
+    alignItems: 'center',
+    gap: Spacing.one,
     paddingVertical: Spacing.two,
     paddingHorizontal: Spacing.four,
-    backgroundColor: 'rgba(18, 20, 19, 0.72)',
+    backgroundColor: 'rgba(18, 20, 19, 0.80)',
   },
-  hudReps: {
+  phaseBanner: {
+    ...Type.heading,
+    fontSize: 32,
+    lineHeight: 40,
+    fontWeight: '800',
+    color: '#FAF9F6',
+    textAlign: 'center',
+    letterSpacing: 3,
+  },
+  repsLabel: {
     ...Type.label,
     fontSize: 20,
     lineHeight: 26,
     fontWeight: '800',
     color: '#FAF9F6',
+    letterSpacing: 5,
+  },
+  repsValue: {
+    fontSize: 84,
+    lineHeight: 90,
+    fontWeight: '800',
+    color: '#FAF9F6',
+    textAlign: 'center',
     fontVariant: ['tabular-nums'],
   },
-  hudFeedback: {
-    ...Type.label,
-    fontSize: 17,
-    lineHeight: 24,
-    fontWeight: '600',
+  instruction: {
+    ...Type.bodyEmphasis,
+    fontSize: 28,
+    lineHeight: 34,
+    fontWeight: '700',
     color: '#FAF9F6',
-    flexShrink: 1,
-    textAlign: 'right',
+    textAlign: 'center',
   },
   controlsRow: {
     flexDirection: 'row',

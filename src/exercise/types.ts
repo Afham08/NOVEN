@@ -27,6 +27,50 @@ export type RepThresholds = {
   holdFrames: number;
   /** Minimum landmark visibility (0..1) to accept a frame. */
   minVisibility: number;
+  /**
+   * Largest tolerated gap (ms) between consecutive pose frames. A larger gap
+   * means tracking stalled (camera hiccup, device throttle, app backgrounded),
+   * so the frames on either side of it are not continuous evidence of one
+   * movement and an in-progress rep cycle is discarded rather than joined
+   * across the gap. Counted reps are never affected.
+   */
+  maxFrameGapMs: number;
+};
+
+/**
+ * Thresholds for the readiness gate. Counting only starts after the tracked
+ * joints are visible enough and have held still long enough that the resting
+ * posture is established — so walking into the frame, adjusting the phone, or
+ * settling into the chair are never counted by the initial stabilization.
+ * After counting starts, only a validity break (lost tracking / missing joints)
+ * or a large whole-body translation (the body anchor moving too fast between
+ * frames, i.e. walking toward or away from the camera) suspends counting, and
+ * counting resumes only after the person holds still again.
+ */
+export type ReadinessConfig = {
+  /** Minimum per-landmark visibility (0..1) for the tracked joints. */
+  minVisibility: number;
+  /** Maximum normalized drift per tracked joint between consecutive frames
+   * while considered "still". */
+  maxStableDrift: number;
+  /** Consecutive stable frames required before counting is enabled. */
+  minStableFrames: number;
+  /** Minimum continuous stable tracking time (ms) before counting is enabled. */
+  minStableMs: number;
+  /** Maximum normalized drift per frame of the body anchor (hip midpoint)
+   * tolerated while counting. Larger continuous drift, e.g. walking toward the
+   * camera, suspends counting. */
+  maxAnchorDrift: number;
+  /** Consecutive frames where the anchor drifts past `maxAnchorDrift` before
+   * counting is suspended. An extreme single-frame jump suspends immediately. */
+  anchorDriftSuspendFrames: number;
+  /** Maximum normalized distance the body anchor may travel from the position
+   * captured at readiness. This catches SLOW whole-body relocation — sitting
+   * down, standing up, or walking up to the phone over a second or more — which
+   * moves the hips far from the resting baseline but never fast enough to trip
+   * `maxAnchorDrift` on any single frame. Generous enough to allow the small
+   * postural shifts of a genuine seated rep. */
+  maxAnchorOffset: number;
 };
 
 /** Complete static definition of an exercise for the tracker engine. */
@@ -37,6 +81,8 @@ export type ExerciseConfig = {
   /** Joint angle triplets per side. */
   triplets: Record<Side, AngleTriplet>;
   thresholds: RepThresholds;
+  /** Pre-count readiness / stabilization thresholds. */
+  readiness: ReadinessConfig;
 };
 
 /** Rep detector phase machine states. */
