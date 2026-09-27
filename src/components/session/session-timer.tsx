@@ -1,6 +1,7 @@
 import { StyleSheet, Text, View } from 'react-native';
 
 import { Radius, Spacing, Type } from '@/constants/theme';
+import { formatDurationLabel } from '@/exercise/metrics';
 import { useTheme } from '@/hooks/use-theme';
 
 export type SessionTimerProps = {
@@ -12,24 +13,19 @@ export type SessionTimerProps = {
   suggestedSeconds?: number;
 };
 
-function formatTime(totalSeconds: number): string {
-  const mm = Math.floor(totalSeconds / 60)
-    .toString()
-    .padStart(2, '0');
-  const ss = (totalSeconds % 60).toString().padStart(2, '0');
-  return `${mm}:${ss}`;
-}
-
 export function SessionTimer({ seconds, running, suggestedSeconds }: SessionTimerProps) {
   const theme = useTheme();
   const progress = suggestedSeconds ? Math.min(100, (seconds / suggestedSeconds) * 100) : 0;
+  // Shared with the result screen so the live timer and the final duration can
+  // never disagree in format.
+  const label = formatDurationLabel(seconds);
 
   return (
     <View style={styles.container}>
       <Text
         style={[styles.time, { color: theme.heading }]}
-        accessibilityLabel={`Session time ${formatTime(seconds)}`}>
-        {formatTime(seconds)}
+        accessibilityLabel={`Session time ${label}`}>
+        {label}
       </Text>
       <Text style={[styles.caption, { color: theme.textSecondary }]}>
         {running ? 'Session in progress' : 'Session paused'}

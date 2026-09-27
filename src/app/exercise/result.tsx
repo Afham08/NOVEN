@@ -1,4 +1,5 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useRef } from 'react';
 import { StyleSheet, Text } from 'react-native';
 
 import { Screen } from '@/components/layout/screen';
@@ -8,6 +9,7 @@ import { Header } from '@/components/ui/header';
 import { InfoRow } from '@/components/ui/info-row';
 import { Spacing, Type } from '@/constants/theme';
 import { getExerciseById } from '@/data/exercises';
+import { paramOrFallback, parseRepCountParam } from '@/exercise/result-params';
 
 export default function ResultScreen() {
   const { id, reps, duration, pace, range, consistency } = useLocalSearchParams<{
@@ -21,16 +23,32 @@ export default function ResultScreen() {
   const router = useRouter();
   const exercise = getExerciseById(id);
 
-  if (!exercise || !reps) {
+  // `reps` crosses the navigation boundary as an untrusted string, so it is
+  // re-validated here rather than coerced blindly. 0 is a real result; "abc",
+  // "-1", "3.7" and "NaN" are not.
+  const repCount = parseRepCountParam(reps);
+
+  /**
+   * Leaving is one-shot. Without this, a double tap (or an impatient repeat)
+   * fires replace() twice, stacking a second /exercise entry and letting the user
+   * navigate Back into this result screen again. The ref flips before the
+   * navigation call, so re-entrant presses within the same frame are ignored.
+   */
+  const leavingRef = useRef(false);
+  const leave = () => {
+    if (leavingRef.current) return;
+    leavingRef.current = true;
+    router.replace('/exercise');
+  };
+
+  if (!exercise || repCount === null) {
     return (
       <Screen>
         <Header title="Result not available" />
-        <Button variant="primary" title="Back" onPress={() => router.replace('/exercise')} />
+        <Button variant="primary" title="Back" onPress={leave} />
       </Screen>
     );
   }
-
-  const repCount = Number(reps);
 
   return (
     <Screen>
@@ -44,13 +62,13 @@ export default function ResultScreen() {
       </Card>
 
       <Card variant="surface" gap={Spacing.three}>
-        <InfoRow label="Duration" value={duration ?? '--'} />
-        <InfoRow label="Pace" value={pace ?? '--'} />
-        <InfoRow label="Knee range" value={range ?? '--'} />
-        <InfoRow label="Consistency" value={consistency ?? '--'} />
+        <InfoRow label="Duration" value={paramOrFallback(duration, '--')} />
+        <InfoRow label="Pace" value={paramOrFallback(pace, '--')} />
+        <InfoRow label="Knee range" value={paramOrFallback(range, '--')} />
+        <InfoRow label="Consistency" value={paramOrFallback(consistency, 'Not enough data')} />
       </Card>
 
-      <Button variant="primary" title="Done" onPress={() => router.replace('/exercise')} />
+      <Button variant="primary" title="Done" onPress={leave} />
     </Screen>
   );
 }

@@ -4,10 +4,10 @@ import { StyleSheet, Text, View } from 'react-native';
 import { Radius, Spacing, Type } from '@/constants/theme';
 
 /**
- * CAMERA PLACEHOLDER — no camera, no pose estimation, no MediaPipe.
- *
- * This is a deliberate stand-in so the session flow can be built and tested.
- * Swap this component for a real camera view once that work begins.
+ * Shown only when the camera is unavailable — permission not granted yet or
+ * denied, or on a platform with no native pose tracker. The session screen
+ * swaps in the real CameraX + MediaPipe PoseTrackerView as soon as camera
+ * permission is granted, so this is the no-camera fallback, not the session UI.
  */
 export function CameraPlaceholder() {
   return (
@@ -18,9 +18,10 @@ export function CameraPlaceholder() {
           size={40}
           tintColor="rgba(250, 249, 246, 0.85)"
         />
-        <Text style={styles.title}>Camera placeholder</Text>
+        <Text style={styles.title}>Camera unavailable</Text>
         <Text style={styles.subtitle}>
-          No camera or pose tracking is used in this demo session.
+          Camera access is needed to track your movement. Allow it in Settings, then reopen this
+          session.
         </Text>
       </View>
     </View>
