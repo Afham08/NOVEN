@@ -1,9 +1,6 @@
-import type { PoseFrameEventPayload } from '../../modules/pose-tracker';
+import type { LandmarkEventPayload, PoseFrameEventPayload } from '../../modules/pose-tracker';
 
 import { PositiveFeedbackLatch, pausedFeedback, phaseFeedback, presenceFeedback, priorityPhase, readinessFeedback, setupFeedback, type FeedbackCue } from './feedback';
-// TEMPORARY DIAGNOSTIC — remove with src/exercise/pose-diagnostics.ts after the
-// physical-device retest confirms which detector produced the false rep.
-import { emptySideDiagnostic, isDevBuild, logFrameDiagnostic, resetFrameDiagnostics, type SideDiagnostic } from './pose-diagnostics';
 import { angleFromTriplet } from './pose-utils';
 import { RepDetector } from './rep-detector';
 import { ReadinessGate, type ReadinessPhase } from './stabilize';
@@ -122,7 +119,6 @@ export class SessionEngine {
     this.countedRanges = [];
     this.lastCountedAtMs = null;
     this.lastFeedback = setupFeedback();
-    resetFrameDiagnostics(); // TEMPORARY DIAGNOSTIC
   }
 
   /**
@@ -172,13 +168,6 @@ export class SessionEngine {
     const left = this.detectors.left;
     const right = this.detectors.right;
 
-    // TEMPORARY DIAGNOSTIC — remove with src/exercise/pose-diagnostics.ts.
-    const angles: Record<Side, number | null> = { left: null, right: null };
-    const completions: Record<Side, SideDiagnostic> = {
-      left: emptySideDiagnostic(),
-      right: emptySideDiagnostic(),
-    };
-
     if (presence !== 'tracked') {
       // Requirement A/I: the person left. Lose the gate and freeze both
       // detectors, so the partial cycle is discarded and re-entry has to earn
@@ -187,20 +176,32 @@ export class SessionEngine {
       left.freeze();
       right.freeze();
       this.latch.clear();
-      this.logDiagnostic(timestampMs, presence, angles, completions);
       return this.emit(presenceFeedback(presence));
     }
 
     // Requirements B/C/D: incomplete, non-finite, or low-visibility landmarks
     // fail here. The gate drops to 'waiting' and freezes the detectors, so an
     // occluded frame can neither count a rep nor corrupt the observed range.
-    this.gate.process(landmarks, timestampMs);
+    const outcome = this.gate.process(landmarks, timestampMs);
+
+    // The stillness window alone cannot tell postures apart: standing is still
+    // and hip-stable, so a person who never sat down is granted counting with a
+    // straight leg. Check the STARTING POSTURE at the moment counting would be
+    // enabled, and refuse it if the tracked joints are not in the rest regime.
+    // Evaluated only here (never per frame) because a genuine rep deliberately
+    // leaves that regime when the knee extends. See ReadinessConfig.
+    if (outcome.becameReady && !this.restingPostureSatisfied(landmarks)) {
+      this.gate.markLost();
+      left.freeze();
+      right.freeze();
+      this.latch.clear();
+      return this.emit(readinessFeedback(this.gate.currentPhase));
+    }
 
     if (this.gate.currentPhase !== 'ready') {
       left.freeze();
       right.freeze();
       this.latch.clear();
-      this.logDiagnostic(timestampMs, presence, angles, completions);
       return this.emit(readinessFeedback(this.gate.currentPhase));
     }
 
@@ -215,26 +216,16 @@ export class SessionEngine {
       // widens the observed range.
       if (!Number.isFinite(angle)) continue;
 
-      angles[side] = angle; // TEMPORARY DIAGNOSTIC
-
       this.range =
         this.range === null
           ? { min: angle, max: angle }
           : { min: Math.min(this.range.min, angle), max: Math.max(this.range.max, angle) };
 
       const outcome = this.detectors[side].process({ angle, timestampMs });
-      // TEMPORARY DIAGNOSTIC: record every DETECTOR-level completion, including
-      // the ones the session cooldown then rejects, so the log shows whether a
-      // false rep came from one side or from both.
-      if (outcome.repCompleted) {
-        completions[side] = { ...completions[side], completed: true, completedRange: outcome.repRange };
-      }
       if (outcome.repCompleted && this.countRep(timestampMs, outcome.repRange)) {
         repCompletedThisFrame = true;
       }
     }
-
-    this.logDiagnostic(timestampMs, presence, angles, completions); // TEMPORARY DIAGNOSTIC
 
     // Requirement F: timestamps are only used for the rep cooldown, which
     // rejects (rather than invents) reps, so out-of-order or duplicated stamps
@@ -300,39 +291,24 @@ export class SessionEngine {
   }
 
   /**
-   * TEMPORARY DIAGNOSTIC — remove with src/exercise/pose-diagnostics.ts after the
-   * physical-device retest. Dev-only and change-driven, so it is a no-op in
-   * release builds and stays silent on frames where nothing material moved.
+   * Whether the tracked joints are inside the exercise's rest regime, i.e. at
+   * least one tracked side's angle is at or below `thresholds.bentAngleDeg` —
+   * the boundary the config already defines as "bent / at rest". No new number
+   * is introduced, and nothing here refers to a particular exercise.
+   *
+   * AT LEAST ONE side is required rather than all of them on purpose. In the
+   * side view this app uses, the far leg is occluded and its landmarks are
+   * model-inferred, so demanding every side would let one bad inference suppress
+   * counting altogether — trading an occasional false rep for permanently missed
+   * reps. A standing person fails the test on BOTH sides (a straight leg reads
+   * ~174deg), so the tolerance costs nothing here.
    */
-  private logDiagnostic(
-    timestampMs: number,
-    presence: string,
-    angles: Record<Side, number | null>,
-    completions: Record<Side, SideDiagnostic>,
-  ): void {
-    if (!isDevBuild()) return;
-
-    const sideState = (side: Side): SideDiagnostic => {
-      const { min, max } = this.detectors[side].cycleBounds;
-      return {
-        angle: angles[side],
-        phase: this.detectors[side].currentPhase,
-        armed: this.detectors[side].isArmed,
-        cycleMin: min,
-        cycleMax: max,
-        completed: completions[side].completed,
-        completedRange: completions[side].completedRange,
-      };
-    };
-
-    logFrameDiagnostic({
-      timestampMs,
-      presence,
-      gatePhase: this.gate.currentPhase,
-      anchorOffset: this.gate.anchorOffsetFromAnchor,
-      left: sideState('left'),
-      right: sideState('right'),
-      sessionReps: this.countedReps,
+  private restingPostureSatisfied(landmarks: LandmarkEventPayload[]): boolean {
+    if (!this.config.readiness.requireRestingPosture) return true;
+    const { minVisibility, bentAngleDeg } = this.config.thresholds;
+    return this.config.sides.some((side) => {
+      const angle = angleFromTriplet(landmarks, this.config.triplets[side], minVisibility);
+      return Number.isFinite(angle) && angle <= bentAngleDeg;
     });
   }
 
