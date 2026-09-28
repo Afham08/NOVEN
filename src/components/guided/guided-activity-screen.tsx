@@ -1,6 +1,11 @@
 import { useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { PermissionsAndroid, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+
+import {
+  PoseTrackerView,
+  type PoseFrameEventPayload,
+} from '../../../modules/pose-tracker';
 
 import { describeLength, describeStepPosition } from '@/activities/activity-format';
 import { GuidedSession, type GuidedSnapshot } from '@/activities/guided-session';
@@ -8,7 +13,10 @@ import type { GuidedActivity } from '@/activities/types';
 import { buildSessionMetrics } from '@/exercise/metrics';
 import { createSessionId, createSessionRecord } from '@/exercise/session-store';
 import { sessionStore } from '@/exercise/session-storage';
+import { SessionEngine } from '@/exercise/session-engine';
+import { getGuidedPoseConfig } from '@/exercise/pose-configs';
 import { Screen } from '@/components/layout/screen';
+import { CameraPlaceholder } from '@/components/session/camera-placeholder';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Header } from '@/components/ui/header';
@@ -59,7 +67,30 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
   const [snapshot, setSnapshot] = useState<GuidedSnapshot>(() => session.snapshot());
   const [saving, setSaving] = useState(false);
 
+  /** Camera permission state for camera-tracked steps. */
+  const [hasCameraPermission, setHasCameraPermission] = useState<boolean | null>(null);
+
+  /** SessionEngine for the current camera-tracked step, if any (held in ref to avoid effect setState). */
+  const cameraEngineRef = useRef<SessionEngine | null>(null);
+
+  /** Whether a camera engine is active (for render condition). */
+  const [hasCameraEngine, setHasCameraEngine] = useState(false);
+
+  /** Camera HUD state for camera-tracked steps. */
+  const [cameraHud, setCameraHud] = useState<{ reps: number; feedback: { text: string; tone: string } }>({
+    reps: 0,
+    feedback: { text: '', tone: 'neutral' },
+  });
+
   const running = snapshot.phase === 'running';
+
+  /** Current step's camera config, if any. */
+  const currentStepConfig = snapshot.currentStep?.cameraConfigId
+    ? getGuidedPoseConfig(snapshot.currentStep.cameraConfigId)
+    : undefined;
+
+  /** Whether we're currently on a camera-tracked step. */
+  const isCameraStep = currentStepConfig !== undefined;
 
   /**
    * Stable on purpose: these three are dependencies of the effects below and of
@@ -84,6 +115,70 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
     session.resume();
     setSnapshot(session.snapshot());
   }, [session]);
+
+  /**
+   * Request camera permission for camera-tracked steps.
+   */
+  const requestCameraPermission = useCallback(async () => {
+    if (Platform.OS !== 'android') {
+      setHasCameraPermission(false);
+      return;
+    }
+    try {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.CAMERA,
+        {
+          title: 'Camera access',
+          message: 'NOVEN uses the camera to track your movement during this pose.',
+          buttonNeutral: 'Ask Me Later',
+          buttonNegative: 'Cancel',
+          buttonPositive: 'OK',
+        },
+      );
+      setHasCameraPermission(granted === PermissionsAndroid.RESULTS.GRANTED);
+    } catch {
+      setHasCameraPermission(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(requestCameraPermission, 0);
+    return () => clearTimeout(timer);
+  }, [requestCameraPermission]);
+
+/**
+   * Update camera engine when the camera-tracked step changes.
+   * State updates are deferred to avoid synchronous setState in effect.
+   */
+  useEffect(() => {
+    if (isCameraStep && currentStepConfig) {
+      cameraEngineRef.current = new SessionEngine(currentStepConfig);
+      // Defer all state updates to avoid synchronous setState in effect
+      setTimeout(() => {
+        setHasCameraEngine(true);
+        setCameraHud({ reps: 0, feedback: { text: 'Get ready', tone: 'neutral' } });
+      }, 0);
+    } else {
+      cameraEngineRef.current = null;
+      setTimeout(() => {
+        setHasCameraEngine(false);
+      }, 0);
+    }
+  }, [isCameraStep, currentStepConfig]);
+
+  /**
+   * Handle pose frames from the camera for the current camera-tracked step.
+   */
+  const handlePoseFrame = useCallback(
+    (event: { nativeEvent: PoseFrameEventPayload }) => {
+      const engine = cameraEngineRef.current;
+      if (!engine) return;
+      if (snapshot.phase !== 'running') return;
+      const result = engine.handlePoseFrame(event);
+      setCameraHud({ reps: result.reps, feedback: result.feedback });
+    },
+    [snapshot.phase],
+  );
 
   /**
    * Ends the session and records it.
@@ -241,6 +336,40 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
             />
           </View>
         </View>
+      )}
+
+      {/* Camera preview for camera-tracked steps */}
+      {isCameraStep && running && hasCameraPermission && hasCameraEngine && (
+        <View style={styles.cameraFrame}>
+          <PoseTrackerView
+            style={styles.camera}
+            onFrame={() => {}}
+            onPoseFrame={handlePoseFrame}
+          />
+          <View style={styles.cameraHudOverlay}>
+            {cameraHud.reps === 0 ? (
+              <View style={styles.cameraReadyPanel}>
+                <Text style={styles.cameraReadyTitle}>GET READY</Text>
+                <Text style={styles.cameraReadyLine}>
+                  {currentStepConfig?.name ?? 'Pose'}
+                </Text>
+                <Text style={styles.cameraReadyHint}>
+                  {cameraHud.feedback.text}
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.cameraRunPanel}>
+                <Text style={styles.cameraRepsLabel}>REPS</Text>
+                <Text style={styles.cameraRepsValue}>{cameraHud.reps}</Text>
+                <Text style={styles.cameraInstruction}>{cameraHud.feedback.text}</Text>
+              </View>
+            )}
+          </View>
+        </View>
+      )}
+
+      {isCameraStep && running && !hasCameraPermission && (
+        <CameraPlaceholder />
       )}
 
       <StatusChip label={phaseLabel} tone={phaseTone} />
@@ -499,5 +628,92 @@ const styles = StyleSheet.create({
     fontSize: 17,
     lineHeight: 24,
     fontWeight: '700',
+  },
+  cameraFrame: {
+    width: '100%',
+    aspectRatio: 1,
+    borderRadius: Radius.card,
+    overflow: 'hidden',
+    backgroundColor: '#202522',
+  },
+  camera: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  cameraHudOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    justifyContent: 'flex-end',
+  },
+  cameraReadyPanel: {
+    alignItems: 'center',
+    gap: Spacing.two,
+    margin: Spacing.four,
+    paddingVertical: Spacing.five,
+    paddingHorizontal: Spacing.six,
+    borderRadius: Radius.card,
+    backgroundColor: 'rgba(18, 20, 19, 0.74)',
+  },
+  cameraReadyTitle: {
+    ...Type.heading,
+    fontSize: 40,
+    lineHeight: 48,
+    fontWeight: '800',
+    color: '#FAF9F6',
+    textAlign: 'center',
+    letterSpacing: 1,
+  },
+  cameraReadyLine: {
+    ...Type.bodyEmphasis,
+    fontSize: 24,
+    lineHeight: 32,
+    fontWeight: '700',
+    color: '#FAF9F6',
+    textAlign: 'center',
+  },
+  cameraReadyHint: {
+    ...Type.body,
+    fontSize: 19,
+    lineHeight: 26,
+    fontWeight: '500',
+    color: '#E7EFEB',
+    textAlign: 'center',
+  },
+  cameraRunPanel: {
+    alignItems: 'center',
+    gap: Spacing.one,
+    paddingVertical: Spacing.two,
+    paddingHorizontal: Spacing.four,
+    backgroundColor: 'rgba(18, 20, 19, 0.80)',
+  },
+  cameraRepsLabel: {
+    ...Type.label,
+    fontSize: 20,
+    lineHeight: 26,
+    fontWeight: '800',
+    color: '#FAF9F6',
+    letterSpacing: 5,
+  },
+  cameraRepsValue: {
+    fontSize: 84,
+    lineHeight: 90,
+    fontWeight: '800',
+    color: '#FAF9F6',
+    textAlign: 'center',
+    fontVariant: ['tabular-nums'],
+  },
+  cameraInstruction: {
+    ...Type.bodyEmphasis,
+    fontSize: 28,
+    lineHeight: 34,
+    fontWeight: '700',
+    color: '#FAF9F6',
+    textAlign: 'center',
   },
 });

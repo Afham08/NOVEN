@@ -39,6 +39,13 @@ export type GuidedStep = {
   title: string;
   /** One plain sentence telling the person what to do. */
   guidance: string;
+  /**
+   * Optional id of a camera-tracked pose config from pose-configs.ts.
+   * When present, this step will use the camera to track the movement.
+   * The step auto-advances when the required reps are completed,
+   * or can be manually advanced.
+   */
+  cameraConfigId?: string;
 };
 
 /** A whole guided activity: something a person can start and finish. */

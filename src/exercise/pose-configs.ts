@@ -189,20 +189,275 @@ export const SIT_TO_STAND: ExerciseConfig = {
 };
 
 /**
- * Every camera-tracked movement, by the id used in the exercise catalogue.
+ * Camera-tracked yoga poses.
  *
- * A plain object rather than a Map so the set is literal and greppable, and so a
- * config whose id disagrees with its catalogue entry is a visible mistake
- * rather than a lookup that quietly returns undefined.
+ * These are individual pose configurations that can be used within a guided
+ * yoga routine. Each tracks a specific joint angle that MediaPipe can reliably
+ * measure from a side view.
  */
-const POSE_CONFIGS: Readonly<Record<string, ExerciseConfig>> = {
+
+/**
+ * Neck Extension — "Look Up" pose.
+ * Tracks the angle from shoulder to nose (cervical extension).
+ * Rest: chin tucked (~20-30 deg), Extended: looking up (~70-90 deg).
+ */
+export const NECK_EXTENSION: ExerciseConfig = {
+  id: 'yoga-neck-extension',
+  name: 'Neck Extension (Look Up)',
+  sides: ['left', 'right'],
+  triplets: {
+    left: {
+      hip: 'LEFT_SHOULDER',
+      knee: 'NOSE',
+      ankle: 'LEFT_EAR',
+    },
+    right: {
+      hip: 'RIGHT_SHOULDER',
+      knee: 'NOSE',
+      ankle: 'RIGHT_EAR',
+    },
+  },
+  thresholds: {
+    /** Chin tucked toward chest. */
+    bentAngleDeg: 30,
+    /** Looking up, neck extended. */
+    extendedAngleDeg: 75,
+    /** Minimum range for a valid movement. */
+    minRangeDeg: 25,
+    /** Time between reps - slow movement. */
+    minRepIntervalMs: 2000,
+    holdFrames: 3,
+    minVisibility: 0.5,
+    maxFrameGapMs: 1500,
+  },
+  readiness: {
+    minVisibility: 0.5,
+    maxStableDrift: 0.02,
+    minStableFrames: 15,
+    minStableMs: 1500,
+    maxAnchorDrift: 0.03,
+    anchorDriftSuspendFrames: 2,
+    maxAnchorOffset: 0.1,
+    /** Starting with chin slightly tucked. */
+    requireRestingPosture: true,
+  },
+};
+
+/**
+ * Shoulder Flexion — "Reach Up" / "Open Arms" pose.
+ * Tracks shoulder angle (hip -> shoulder -> elbow).
+ * Rest: arms down (~10-25 deg), Extended: arms overhead (~140-160 deg).
+ */
+export const SHOULDER_FLEXION: ExerciseConfig = {
+  id: 'yoga-shoulder-flexion',
+  name: 'Shoulder Flexion (Reach Up)',
+  sides: ['left', 'right'],
+  triplets: {
+    left: {
+      hip: 'LEFT_HIP',
+      knee: 'LEFT_SHOULDER',
+      ankle: 'LEFT_ELBOW',
+    },
+    right: {
+      hip: 'RIGHT_HIP',
+      knee: 'RIGHT_SHOULDER',
+      ankle: 'RIGHT_ELBOW',
+    },
+  },
+  thresholds: {
+    /** Arms relaxed at sides. */
+    bentAngleDeg: 30,
+    /** Arms raised overhead. */
+    extendedAngleDeg: 140,
+    minRangeDeg: 50,
+    minRepIntervalMs: 2000,
+    holdFrames: 3,
+    minVisibility: 0.4,
+    maxFrameGapMs: 1500,
+  },
+  readiness: {
+    minVisibility: 0.4,
+    maxStableDrift: 0.03,
+    minStableFrames: 10,
+    minStableMs: 1000,
+    maxAnchorDrift: 0.04,
+    anchorDriftSuspendFrames: 2,
+    maxAnchorOffset: 0.12,
+    /** Arms down at rest. */
+    requireRestingPosture: true,
+  },
+};
+
+/**
+ * Trunk Lateral Flexion — "Side Bend" pose.
+ * Tracks trunk angle (shoulder -> hip -> knee... approximated via shoulder-hip line).
+ * Using shoulder midpoint to hip midpoint angle relative to vertical.
+ * Rest: upright (~0-10 deg), Extended: side bend (~25-35 deg).
+ */
+export const TRUNK_LATERAL_FLEXION: ExerciseConfig = {
+  id: 'yoga-trunk-lateral-flexion',
+  name: 'Trunk Lateral Flexion (Side Bend)',
+  sides: ['left', 'right'],
+  triplets: {
+    left: {
+      hip: 'LEFT_SHOULDER',
+      knee: 'LEFT_HIP',
+      ankle: 'LEFT_KNEE',
+    },
+    right: {
+      hip: 'RIGHT_SHOULDER',
+      knee: 'RIGHT_HIP',
+      ankle: 'RIGHT_KNEE',
+    },
+  },
+  thresholds: {
+    /** Upright posture. */
+    bentAngleDeg: 10,
+    /** Side bend achieved. */
+    extendedAngleDeg: 30,
+    minRangeDeg: 15,
+    minRepIntervalMs: 3000,
+    holdFrames: 5,
+    minVisibility: 0.4,
+    maxFrameGapMs: 2000,
+  },
+  readiness: {
+    minVisibility: 0.4,
+    maxStableDrift: 0.03,
+    minStableFrames: 15,
+    minStableMs: 2000,
+    maxAnchorDrift: 0.03,
+    anchorDriftSuspendFrames: 3,
+    maxAnchorOffset: 0.15,
+    requireRestingPosture: true,
+  },
+};
+
+/**
+ * Trunk Forward Flexion — "Forward Fold" / "Hands to Feet" pose.
+ * Tracks hip angle (shoulder -> hip -> knee).
+ * Rest: upright (~170-180 deg), Folded: forward bend (~90-110 deg).
+ */
+export const TRUNK_FORWARD_FLEXION: ExerciseConfig = {
+  id: 'yoga-trunk-forward-flexion',
+  name: 'Trunk Forward Flexion (Forward Fold)',
+  sides: ['left', 'right'],
+  triplets: {
+    left: {
+      hip: 'LEFT_SHOULDER',
+      knee: 'LEFT_HIP',
+      ankle: 'LEFT_KNEE',
+    },
+    right: {
+      hip: 'RIGHT_SHOULDER',
+      knee: 'RIGHT_HIP',
+      ankle: 'RIGHT_KNEE',
+    },
+  },
+  thresholds: {
+    /** Upright sitting/standing. */
+    bentAngleDeg: 165,
+    /** Forward fold achieved. */
+    extendedAngleDeg: 100,
+    minRangeDeg: 40,
+    minRepIntervalMs: 3000,
+    holdFrames: 5,
+    minVisibility: 0.4,
+    maxFrameGapMs: 2000,
+  },
+  readiness: {
+    minVisibility: 0.4,
+    maxStableDrift: 0.03,
+    minStableFrames: 15,
+    minStableMs: 2000,
+    maxAnchorDrift: 0.03,
+    anchorDriftSuspendFrames: 3,
+    maxAnchorOffset: 0.15,
+    requireRestingPosture: true,
+  },
+};
+
+/**
+ * Hip Flexion (Seated March) — "March on the Spot" pose.
+ * Tracks knee angle (hip -> knee -> ankle) for seated marching.
+ * Rest: knee bent (~90-100 deg), Extended: knee lifted (~60-75 deg).
+ */
+export const SEATED_HIP_FLEXION: ExerciseConfig = {
+  id: 'yoga-seated-hip-flexion',
+  name: 'Seated Hip Flexion (March)',
+  sides: ['left', 'right'],
+  triplets: {
+    left: {
+      hip: 'LEFT_HIP',
+      knee: 'LEFT_KNEE',
+      ankle: 'LEFT_ANKLE',
+    },
+    right: {
+      hip: 'RIGHT_HIP',
+      knee: 'RIGHT_KNEE',
+      ankle: 'RIGHT_ANKLE',
+    },
+  },
+  thresholds: {
+    /** Foot on floor, knee bent. */
+    bentAngleDeg: 100,
+    /** Knee lifted toward chest. */
+    extendedAngleDeg: 70,
+    minRangeDeg: 20,
+    minRepIntervalMs: 1500,
+    holdFrames: 3,
+    minVisibility: 0.4,
+    maxFrameGapMs: 1500,
+  },
+  readiness: {
+    minVisibility: 0.4,
+    maxStableDrift: 0.03,
+    minStableFrames: 10,
+    minStableMs: 1000,
+    maxAnchorDrift: 0.04,
+    anchorDriftSuspendFrames: 2,
+    maxAnchorOffset: 0.12,
+    requireRestingPosture: true,
+  },
+};
+
+/**
+ * Camera-tracked exercise configs only (for the exercise catalogue).
+ *
+ * These are the movements that appear in the exercise list and have dedicated
+ * session screens with full rep counting and metrics.
+ */
+const EXERCISE_POSE_CONFIGS: Readonly<Record<string, ExerciseConfig>> = {
   [SEATED_KNEE_EXTENSION.id]: SEATED_KNEE_EXTENSION,
   [SEATED_ARM_RAISE.id]: SEATED_ARM_RAISE,
   [SIT_TO_STAND.id]: SIT_TO_STAND,
 };
 
-/** All camera-tracked configs, for tests and for the exercise detail screen. */
-export const poseTrackedConfigs: readonly ExerciseConfig[] = Object.values(POSE_CONFIGS);
+/**
+ * Camera-tracked guided activity configs (for Yoga/Meditation steps).
+ *
+ * These are individual pose configurations used within guided activities.
+ * They are NOT listed in the exercise catalogue and do not have dedicated
+ * session screens. They are used by the guided activity screen for specific
+ * steps that support camera guidance.
+ */
+const GUIDED_POSE_CONFIGS: Readonly<Record<string, ExerciseConfig>> = {
+  [NECK_EXTENSION.id]: NECK_EXTENSION,
+  [SHOULDER_FLEXION.id]: SHOULDER_FLEXION,
+  [TRUNK_LATERAL_FLEXION.id]: TRUNK_LATERAL_FLEXION,
+  [TRUNK_FORWARD_FLEXION.id]: TRUNK_FORWARD_FLEXION,
+  [SEATED_HIP_FLEXION.id]: SEATED_HIP_FLEXION,
+};
+
+/**
+ * All camera-tracked exercise configs, for tests and the exercise detail screen.
+ */
+export const poseTrackedConfigs: readonly ExerciseConfig[] = Object.values(EXERCISE_POSE_CONFIGS);
+
+/**
+ * All camera-tracked guided activity configs, for the guided activity screen.
+ */
+export const guidedPoseTrackedConfigs: readonly ExerciseConfig[] = Object.values(GUIDED_POSE_CONFIGS);
 
 function firstId(id?: string | string[] | null): string | null {
   const key = Array.isArray(id) ? id[0] : id;
@@ -210,18 +465,31 @@ function firstId(id?: string | string[] | null): string | null {
 }
 
 /**
- * The config for a catalogue id, or undefined when the exercise is not
- * camera-tracked. Accepts the raw `useLocalSearchParams` shape, which is either a
- * string or an array of strings depending on the platform and navigation state,
- * so no caller has to normalise it first.
+ * The config for an exercise catalogue id, or undefined when the exercise is not
+ * camera-tracked. Accepts the raw `useLocalSearchParams` shape.
  */
 export function getExerciseConfig(id?: string | string[] | null): ExerciseConfig | undefined {
   const key = firstId(id);
   if (key === null) return undefined;
-  return POSE_CONFIGS[key];
+  return EXERCISE_POSE_CONFIGS[key];
+}
+
+/**
+ * The config for a guided activity camera config id, or undefined.
+ * Used by the guided activity screen for camera-tracked steps.
+ */
+export function getGuidedPoseConfig(id?: string | string[] | null): ExerciseConfig | undefined {
+  const key = firstId(id);
+  if (key === null) return undefined;
+  return GUIDED_POSE_CONFIGS[key];
 }
 
 /** True when NOVEN has real camera thresholds for this exercise. */
 export function isPoseTracked(id?: string | string[] | null): boolean {
   return getExerciseConfig(id) !== undefined;
+}
+
+/** True when a guided activity step has camera tracking available. */
+export function isGuidedPoseTracked(id?: string | string[] | null): boolean {
+  return getGuidedPoseConfig(id) !== undefined;
 }

@@ -30,6 +30,7 @@ export const yogaRoutines: readonly GuidedActivity[] = [
         seconds: 40,
         title: 'Look Up',
         guidance: 'Lift your chin a little and look gently upwards. Breathe normally.',
+        cameraConfigId: 'yoga-neck-extension',
       },
       {
         seconds: 40,
@@ -40,11 +41,13 @@ export const yogaRoutines: readonly GuidedActivity[] = [
         seconds: 50,
         title: 'Side Bend',
         guidance: 'Hold the side of your chair. Lean slowly towards that hand, then come back up.',
+        cameraConfigId: 'yoga-trunk-lateral-flexion',
       },
       {
         seconds: 50,
         title: 'Forward Fold',
         guidance: 'Slide your hands down your legs as you lean forward. Let your head hang heavy.',
+        cameraConfigId: 'yoga-trunk-forward-flexion',
       },
       {
         seconds: 30,
@@ -77,6 +80,7 @@ export const yogaRoutines: readonly GuidedActivity[] = [
         seconds: 45,
         title: 'Tilt Your Ear',
         guidance: 'Tilt your head gently towards one shoulder. Hold the other side the same way.',
+        cameraConfigId: 'yoga-neck-extension',
       },
       {
         seconds: 45,
@@ -87,6 +91,7 @@ export const yogaRoutines: readonly GuidedActivity[] = [
         seconds: 45,
         title: 'Open Your Arms',
         guidance: 'Reach both arms forward and draw your shoulders back. Breathe out as you do.',
+        cameraConfigId: 'yoga-shoulder-flexion',
       },
       {
         seconds: 30,
@@ -114,11 +119,13 @@ export const yogaRoutines: readonly GuidedActivity[] = [
         seconds: 45,
         title: 'Hands to Feet',
         guidance: 'Slide both hands down your legs towards your feet. Sit back up without rushing.',
+        cameraConfigId: 'yoga-trunk-forward-flexion',
       },
       {
         seconds: 45,
         title: 'Reach Up',
         guidance: 'Reach both arms up above your head, then lower them slowly.',
+        cameraConfigId: 'yoga-shoulder-flexion',
       },
       {
         seconds: 45,
@@ -129,11 +136,13 @@ export const yogaRoutines: readonly GuidedActivity[] = [
         seconds: 45,
         title: 'Stand and Sit',
         guidance: 'Stand up in front of your chair, then lower yourself back down. Hold the chair if you need to.',
+        cameraConfigId: 'sit-to-stand',
       },
       {
         seconds: 45,
         title: 'March on the Spot',
         guidance: 'While seated, lift one foot a little off the floor, then the other.',
+        cameraConfigId: 'yoga-seated-hip-flexion',
       },
       {
         seconds: 45,
