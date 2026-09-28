@@ -25,12 +25,30 @@ export default function ProgressScreen() {
   const { summary, totalSessions } = useProgress(sessionStore);
 
   /**
-   * Reopening a past session reuses the existing result screen exactly as it is:
-   * the stored numbers are formatted with the same helpers the live session used
-   * to build its route params, and that screen's own validation re-checks them
-   * on the way in.
+   * Reopening a past session reuses the existing result screens exactly as they
+   * are: the stored numbers are formatted with the same helpers the live sessions
+   * used to build their route params, and those screens' own validation re-checks
+   * them on the way in.
+   *
+   * A guided session goes to the guided result rather than the exercise one. Both
+   * screens draw from the same stored numbers, but the exercise result leads with
+   * a repetition count and then asks for a pace, a pose range and a steadiness —
+   * four figures a breathing session has no observation behind, and four
+   * "not enough data" rows on somebody's finished routine.
    */
   const openSession = (record: SessionRecord) => {
+    if (record.activityKind !== undefined && record.activityKind !== 'exercise') {
+      router.push({
+        pathname: '/activity-result',
+        params: {
+          id: record.exerciseId,
+          steps: String(record.stepsCompleted ?? 0),
+          seconds: String(record.durationSeconds),
+        },
+      });
+      return;
+    }
+
     router.push({
       pathname: '/exercise/result',
       params: {

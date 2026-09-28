@@ -46,7 +46,7 @@ export default function ResultScreen() {
   const leave = () => {
     if (leavingRef.current) return;
     leavingRef.current = true;
-    router.replace('/exercise');
+    router.replace('/');
   };
 
   if (!exercise || repCount === null) {

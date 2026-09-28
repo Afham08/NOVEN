@@ -8,6 +8,7 @@ import { Header } from '@/components/ui/header';
 import { SectionHeader } from '@/components/ui/section-header';
 import { Spacing, Type } from '@/constants/theme';
 import { formatDuration, getExerciseById } from '@/data/exercises';
+import { isPoseTracked } from '@/exercise/pose-configs';
 import { useTheme } from '@/hooks/use-theme';
 
 export default function ExerciseDetailScreen() {
@@ -15,6 +16,15 @@ export default function ExerciseDetailScreen() {
   const router = useRouter();
   const theme = useTheme();
   const exercise = getExerciseById(id);
+
+  /*
+   * Whether NOVEN can watch this movement at all is decided by the pose config
+   * registry, not by anything written on this screen. An exercise with no config
+   * has no camera thresholds, so the screen says so and offers the way to read
+   * the steps instead of a Start button that would open a session which could not
+   * count anything.
+   */
+  const tracked = isPoseTracked(id);
 
   if (!exercise) {
     return (
@@ -51,13 +61,22 @@ export default function ExerciseDetailScreen() {
         <Text style={[styles.safetyText, { color: theme.text }]}>{exercise.safetyNote}</Text>
       </Card>
 
-      <Button
-        variant="primary"
-        title="Start Exercise"
-        onPress={() =>
-          router.push({ pathname: '/exercise/session', params: { id: exercise.id } })
-        }
-      />
+      {tracked ? (
+        <Button
+          variant="primary"
+          title="Start Exercise"
+          onPress={() =>
+            router.push({ pathname: '/exercise/session', params: { id: exercise.id } })
+          }
+        />
+      ) : (
+        <Card variant="surface" gap={Spacing.two}>
+          <Text style={[styles.safetyText, { color: theme.text }]}>
+            NOVEN cannot watch this one, so it will not count anything. Read the steps
+            above and take your time with them.
+          </Text>
+        </Card>
+      )}
     </Screen>
   );
 }

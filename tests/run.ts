@@ -1,5 +1,7 @@
 import { awaitAllSuites, report } from './harness';
 
+import { run as runActivities } from './activities.test';
+import { run as runActivityFlow } from './activity-flow.test';
 import { run as runMetrics } from './metrics.test';
 import { run as runPoseStream } from './pose-stream.test';
 import { run as runPoseUtils } from './pose-utils.test';
@@ -11,9 +13,12 @@ import { run as runRepAggregation } from './rep-aggregation.test';
 import { run as runResultRouting } from './result-routing.test';
 import { run as runSessionStore } from './session-store.test';
 import { run as runSettingsNavigation } from './settings-navigation.test';
+import { run as runThemePreference } from './theme-preference.test';
 import { run as runVoiceFeedback } from './voice-feedback.test';
 
 async function main(): Promise<void> {
+  runActivities();
+  runActivityFlow();
   runMetrics();
   runPoseUtils();
   runRepDetector();
@@ -25,6 +30,7 @@ async function main(): Promise<void> {
   runSessionStore();
   runProgress();
   runProgressChart();
+  runThemePreference();
   runSettingsNavigation();
 
   // The persistence suites are asynchronous, so every suite has to finish before

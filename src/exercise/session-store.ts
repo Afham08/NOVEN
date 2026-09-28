@@ -54,12 +54,36 @@ export const SESSION_HISTORY_KEY = 'noven.session-history.v1';
 export const MAX_SAVED_SESSIONS = 200;
 
 /**
+ * What kind of activity produced a session.
+ *
+ * 'exercise' is the camera-tracked case and is also the default, so a record
+ * written before the guided activities existed is read back as an exercise. The
+ * other three are the timer-driven activities, which have no joint angles and so
+ * no pace, range, or steadiness to report.
+ */
+export type SessionKind = 'exercise' | 'yoga' | 'meditation' | 'wellness';
+
+const SESSION_KINDS: readonly SessionKind[] = ['exercise', 'yoga', 'meditation', 'wellness'];
+
+/** True for a value this app would have written as a session kind. */
+export function isSessionKind(value: unknown): value is SessionKind {
+  return typeof value === 'string' && (SESSION_KINDS as readonly string[]).includes(value);
+}
+
+/**
  * A completed session, as persisted.
  *
  * Deliberately built by extending `SessionMetrics` rather than restating its
  * six fields: the persisted shape cannot drift away from the metrics the engine
  * produced, and a metric added to `SessionMetrics` later is a compile error
  * here rather than a silently missing field.
+ *
+ * `activityKind` and `stepsCompleted` are OPTIONAL and are simply absent on a
+ * record written before the guided activities existed. That is what makes this
+ * additive: an old history keeps loading untouched, and a camera session does
+ * not gain two fields it has no honest value for. A guided session still carries
+ * a real `reps` of 0 and real nulls for the camera metrics, because NOVEN did
+ * not measure them and the store must not imply otherwise.
  */
 export type SessionRecord = SessionMetrics & {
   id: string;
@@ -67,6 +91,10 @@ export type SessionRecord = SessionMetrics & {
   exerciseName: string;
   /** ISO-8601 timestamp of when the session was completed. */
   completedAt: string;
+  /** Absent means an exercise session. */
+  activityKind?: SessionKind;
+  /** Guided steps finished. Absent means a camera session, which has none. */
+  stepsCompleted?: number;
 };
 
 /** The subset of AsyncStorage this module needs. AsyncStorage satisfies it. */
@@ -81,7 +109,9 @@ export type KeyValueStore = {
  *
  * The id and the timestamp are required rather than defaulted so that building a
  * record stays a pure function: the caller decides both, which is what makes a
- * completed session reproducible in a test.
+ * completed session reproducible in a test. The guided fields are optional for
+ * the same reason, and are omitted entirely rather than defaulted, so a camera
+ * session produces exactly the record shape it always did.
  */
 export type NewSessionRecord = {
   id: string;
@@ -89,6 +119,8 @@ export type NewSessionRecord = {
   exerciseName: string;
   completedAt: string;
   metrics: SessionMetrics;
+  activityKind?: SessionKind;
+  stepsCompleted?: number;
 };
 
 /** Milliseconds in a day, used only for the "Today"/"Yesterday" labels. */
@@ -122,6 +154,13 @@ export function createSessionRecord(input: NewSessionRecord): SessionRecord {
     rangeMinDeg: metrics.rangeMinDeg,
     rangeMaxDeg: metrics.rangeMaxDeg,
     consistencyPct: metrics.consistencyPct,
+    // Spread rather than assigned conditionally: a key present with the value
+    // `undefined` would still be written to disk by JSON.stringify as absent, but
+    // it would also make `'activityKind' in record` true, so the read side could
+    // no longer tell "written before this field existed" from "explicitly an
+    // exercise". Omitting the key outright is the only unambiguous form.
+    ...(input.activityKind !== undefined ? { activityKind: input.activityKind } : {}),
+    ...(input.stepsCompleted !== undefined ? { stepsCompleted: input.stepsCompleted } : {}),
   };
 }
 
@@ -203,6 +242,28 @@ export function parseSessionRecord(value: unknown): SessionRecord | null {
     if (input !== null && parsed === null) return null;
   }
 
+  /*
+   * The guided fields are validated to the same standard as everything else: a
+   * kind this app never writes, or a step count that is not a whole number, means
+   * the blob was written by something other than this app, so the record is
+   * dropped rather than read with a guessed value. Both are OPTIONAL, and an
+   * absent one is not an error - that is the shape of every record stored before
+   * the guided activities existed, and dropping those would erase a real
+   * user's history on upgrade.
+   */
+  let activityKind: SessionKind | undefined;
+  if (raw.activityKind !== undefined) {
+    if (!isSessionKind(raw.activityKind)) return null;
+    activityKind = raw.activityKind;
+  }
+
+  let stepsCompleted: number | undefined;
+  if (raw.stepsCompleted !== undefined) {
+    const parsedSteps = countOrNull(raw.stepsCompleted);
+    if (parsedSteps === null) return null;
+    stepsCompleted = parsedSteps;
+  }
+
   return {
     id,
     exerciseId,
@@ -214,6 +275,8 @@ export function parseSessionRecord(value: unknown): SessionRecord | null {
     rangeMinDeg,
     rangeMaxDeg,
     consistencyPct,
+    ...(activityKind !== undefined ? { activityKind } : {}),
+    ...(stepsCompleted !== undefined ? { stepsCompleted } : {}),
   };
 }
 

@@ -1,0 +1,392 @@
+import { check, suite } from './harness';
+
+import {
+  allGuidedActivities,
+  assertCatalogIsUsable,
+  BY_KIND,
+  findGuidedActivity,
+  findGuidedActivityInKind,
+  guidedActivitiesForDay,
+  guidedCatalog,
+} from '../src/activities/catalog';
+import {
+  describeLength,
+  describeSessionOutcome,
+  describeStepPosition,
+} from '../src/activities/activity-format';
+import { GuidedSession, PROGRESS_MAX } from '../src/activities/guided-session';
+import { GUIDED_ACTIVITY_KINDS, totalStepSeconds, isGuidedActivityKind, type GuidedActivity } from '../src/activities/types';
+import { countDoneToday, todayStatus } from '../src/activities/today';
+import { parseSecondsParam, parseStepCountParam, wholeNumberParam } from '../src/activities/result-params';
+import type { SessionRecord } from '../src/exercise/session-store';
+
+/**
+ * A clock the tests drive by hand.
+ *
+ * The session engine reads time through a function rather than calling
+ * `Date.now()`, which is the only reason elapsed-time behaviour can be asserted
+ * exactly rather than approximately. A test that waits for real seconds is a
+ * slow test that fails on a loaded machine; this one is neither.
+ */
+function fakeClock(startMs = 1_000_000) {
+  let nowMs = startMs;
+  return {
+    now: () => nowMs,
+    advance(seconds: number) {
+      nowMs += seconds * 1000;
+      return nowMs;
+    },
+  };
+}
+
+export function run(): void {
+  // ==========================================================================
+  // The timer
+  // ==========================================================================
+  suite('guided session: the clock is the only source of elapsed time', () => {
+    const activity = guidedCatalog('meditation')[0];
+    const clock = fakeClock();
+    const session = new GuidedSession(activity, clock.now);
+
+    check('a new session is ready, not running', session.snapshot().phase === 'ready');
+    check('a ready session has not started its clock', session.snapshot().elapsedSeconds === 0);
+
+    // Advancing the clock while nothing is running must not move anything: a
+    // phone that is asleep on a ready screen has not begun the session.
+    clock.advance(120);
+    check('time passing before Start does not count', session.snapshot().elapsedSeconds === 0);
+
+    session.start();
+    clock.advance(30);
+    check('time counts once started', session.snapshot().elapsedSeconds === 30, session.snapshot().elapsedSeconds);
+    check('it reports running', session.snapshot().phase === 'running');
+    check('it shows the time left', session.snapshot().remainingSeconds === activity.durationSeconds - 30, session.snapshot().remainingSeconds);
+
+    session.pause();
+    clock.advance(300);
+    check('a paused session does not gain time', session.snapshot().elapsedSeconds === 30, session.snapshot().elapsedSeconds);
+    check('a paused session says paused', session.snapshot().phase === 'paused');
+
+    session.resume();
+    clock.advance(10);
+    check('resuming continues from where it stopped', session.snapshot().elapsedSeconds === 40, session.snapshot().elapsedSeconds);
+
+    session.reset();
+    check('reset returns it to ready', session.snapshot().phase === 'ready');
+    check('reset clears the clock', session.snapshot().elapsedSeconds === 0);
+  });
+
+  suite('guided session: progress is bounded and never exceeds the end', () => {
+    const activity = guidedCatalog('wellness')[0];
+    const clock = fakeClock();
+    const session = new GuidedSession(activity, clock.now);
+    session.start();
+
+    for (let i = 0; i < 400; i += 1) {
+      clock.advance(10);
+      const progress = session.snapshot().progress;
+      if (progress < 0 || progress > PROGRESS_MAX) {
+        check(`progress stays within 0..1 (saw ${progress})`, false);
+        break;
+      }
+    }
+    check('progress never leaves 0..1 over a very long run', true);
+    check('elapsed is capped at the planned length', session.snapshot().elapsedSeconds <= activity.durationSeconds, session.snapshot().elapsedSeconds);
+    check('remaining never goes below zero', session.snapshot().remainingSeconds >= 0);
+  });
+
+  suite('guided session: a long jump does not skip past the end', () => {
+    /*
+     * The realistic version of this: someone puts the phone down, comes back
+     * twenty minutes later, and the timer has to be finished, not negative, and
+     * not stuck showing minutes remaining.
+     */
+    const activity = guidedCatalog('yoga')[0];
+    const clock = fakeClock();
+    const session = new GuidedSession(activity, clock.now);
+    session.start();
+    clock.advance(activity.durationSeconds * 20);
+
+    const after = session.snapshot();
+    check('it has finished', after.phase === 'finished', after.phase);
+    check('elapsed is clamped to the planned length', after.elapsedSeconds === activity.durationSeconds, after.elapsedSeconds);
+    check('remaining is zero, not negative', after.remainingSeconds === 0, after.remainingSeconds);
+    check('every step is done', after.stepsCompleted === activity.steps.length, after.stepsCompleted);
+    check('progress reads as complete', after.progress === 1, after.progress);
+  });
+
+  suite('guided session: steps advance in order and the last one completes', () => {
+    const activity = guidedCatalog('yoga')[0];
+    const clock = fakeClock();
+    const session = new GuidedSession(activity, clock.now);
+    session.start();
+
+    let offset = 0;
+    const seen: number[] = [];
+    for (const step of activity.steps) {
+      seen.push(session.snapshot().stepIndex);
+      // Land just before the boundary, so the next reading has to be the step after.
+      clock.advance(step.seconds - 0.5);
+      offset += step.seconds - 0.5;
+      check(`still on the step that has not finished at ${offset}s`, session.snapshot().stepIndex === seen.length - 1, session.snapshot().stepIndex);
+      clock.advance(0.5);
+      offset += 0.5;
+    }
+
+    check('it walked every step in order', seen.every((index, at) => index === at), seen.join(','));
+    check('it finished at the end of the last step', session.snapshot().phase === 'finished', session.snapshot().phase);
+  });
+
+  suite('guided session: ending early keeps what was really done', () => {
+    const activity = guidedCatalog('meditation')[0];
+    const clock = fakeClock();
+    const session = new GuidedSession(activity, clock.now);
+    session.start();
+    clock.advance(5);
+
+    session.finishEarly();
+    const after = session.snapshot();
+
+    check('it stopped', after.phase !== 'running');
+    check('it kept the five seconds it really ran', after.elapsedSeconds === 5, after.elapsedSeconds);
+    check('it does not claim the whole routine', after.stepsCompleted < activity.steps.length, after.stepsCompleted);
+    check('no step is claimed beyond the time that passed', after.stepsCompleted === 0, after.stepsCompleted);
+  });
+
+  suite('guided session: a zero-second step is finished, not stuck', () => {
+    /*
+     * A catalogue entry with a step of 0 seconds would divide by zero in the
+     * step-progress calculation. The engine has to answer rather than produce
+     * NaN, and a NaN here would reach the progress bar as an invisible bar.
+     */
+    const zeroStep: GuidedActivity = {
+      id: 'test-zero-step',
+      kind: 'wellness',
+      name: 'Zero step',
+      summary: 'A step that takes no time.',
+      durationSeconds: 10,
+      progressNoun: 'steps',
+      safetyNote: 'Nothing to do.',
+      steps: [
+        { title: 'Instant', guidance: 'Blink.', seconds: 0 },
+        { title: 'Rest', guidance: 'Wait.', seconds: 10 },
+      ],
+    };
+    const clock = fakeClock();
+    const session = new GuidedSession(zeroStep, clock.now);
+    session.start();
+
+    const immediate = session.snapshot();
+    check('a zero-length step reports a finite progress', Number.isFinite(immediate.stepProgress), immediate.stepProgress);
+    check('a zero-length step does not block the next one', immediate.stepIndex === 1, immediate.stepIndex);
+  });
+
+  // ==========================================================================
+  // The catalogues
+  // ==========================================================================
+  suite('activity catalogue: every entry is usable', () => {
+    check('the catalogue assertion passes', (() => {
+      assertCatalogIsUsable();
+      return true;
+    })());
+
+    check('ids are unique across all three kinds', new Set(allGuidedActivities.map((a) => a.id)).size === allGuidedActivities.length, allGuidedActivities.length);
+
+    for (const kind of GUIDED_ACTIVITY_KINDS) {
+      const items = guidedCatalog(kind);
+      check(`${kind} has at least one activity`, items.length > 0, items.length);
+      for (const activity of items) {
+        check(`${activity.id} has a name`, activity.name.trim().length > 0);
+        check(`${activity.id} has a summary`, activity.summary.trim().length > 0);
+        check(`${activity.id} has a safety note`, activity.safetyNote.trim().length > 0);
+        check(`${activity.id} has at least two steps`, activity.steps.length >= 2, activity.steps.length);
+        check(`${activity.id} has a positive duration`, activity.durationSeconds > 0, activity.durationSeconds);
+        check(`${activity.id} declares its own kind`, activity.kind === kind, activity.kind);
+
+        for (const step of activity.steps) {
+          check(`${activity.id}/${step.title} has a title`, step.title.trim().length > 0);
+          check(`${activity.id}/${step.title} has guidance`, step.guidance.trim().length > 0);
+          check(`${activity.id}/${step.title} has a positive length`, step.seconds > 0, step.seconds);
+          // Elder-friendly and readable from a chair: the guidance has to be sayable.
+          check(`${activity.id}/${step.title} is not a wall of text`, step.guidance.length <= 180, step.guidance.length);
+        }
+
+        check(`${activity.id} duration equals its steps`, totalStepSeconds(activity.steps) === activity.durationSeconds, totalStepSeconds(activity.steps));
+      }
+    }
+  });
+
+  suite('activity catalogue: durations are what the cards promise', () => {
+    const all = allGuidedActivities.map((a) => a.durationSeconds);
+    check('the shortest meditation is genuinely short', Math.min(...guidedCatalog('meditation').map((a) => a.durationSeconds)) <= 60);
+    check('wellness activities are all under two minutes', guidedCatalog('wellness').every((a) => a.durationSeconds < 120), guidedCatalog('wellness').map((a) => a.durationSeconds).join(','));
+    check('nothing is longer than fifteen minutes', all.every((d) => d <= 900), Math.max(...all));
+    check('durations are whole seconds', all.every((d) => Number.isSafeInteger(d)));
+  });
+
+  suite('activity catalogue: lookup is by id, and by kind where it should be', () => {
+    const yoga = guidedCatalog('yoga')[0];
+    const meditation = guidedCatalog('meditation')[0];
+
+    check('found by id across all kinds', findGuidedActivity(yoga.id)?.id === yoga.id);
+    check('found within its own kind', findGuidedActivityInKind('yoga', yoga.id)?.id === yoga.id);
+    check('not found in a kind it does not belong to', findGuidedActivityInKind('meditation', yoga.id) === undefined);
+    check('a missing id finds nothing', findGuidedActivity(undefined) === undefined);
+    check('a wrong id finds nothing', findGuidedActivity('not-a-real-activity') === undefined);
+    check('an id from a different kind is a different activity', findGuidedActivity(meditation.id)?.id !== yoga.id);
+  });
+
+  suite('activity catalogue: a day view carries the done state with the activity', () => {
+    const first = BY_KIND.wellness[0];
+    const view = guidedActivitiesForDay('wellness', [first.id]);
+
+    check('it returns one entry per activity', view.length === BY_KIND.wellness.length);
+    check('the done one is marked done', view.find((entry) => entry.activity.id === first.id)?.done === true);
+    check('the rest are not', view.filter((entry) => entry.done).length === 1);
+    check('each entry carries the activity itself', view.every((entry) => typeof entry.activity.name === 'string'));
+  });
+
+  // ==========================================================================
+  // Wording
+  // ==========================================================================
+  suite('activity wording: lengths read the way a person would say them', () => {
+    check('under a minute is in seconds', describeLength(45) === '45 sec', describeLength(45));
+    check('a whole minute drops the seconds', describeLength(60) === '1 min', describeLength(60));
+    check('a part minute keeps both', describeLength(90) === '1 min 30 sec', describeLength(90));
+    check('a negative length is not printed as one', describeLength(-5) === '0 sec', describeLength(-5));
+    check('a decimal is floored, not rounded up', describeLength(59.9) === '59 sec', describeLength(59.9));
+  });
+
+  suite('activity wording: a guided session is described by what it did', () => {
+    const activity = guidedCatalog('yoga')[0];
+    const base: SessionRecord = {
+      id: 'r1',
+      exerciseId: activity.id,
+      exerciseName: activity.name,
+      completedAt: new Date().toISOString(),
+      reps: 0,
+      durationSeconds: 120,
+      paceRpm: null,
+      rangeMinDeg: null,
+      rangeMaxDeg: null,
+      consistencyPct: null,
+      activityKind: activity.kind,
+      stepsCompleted: 3,
+    };
+
+    check('it counts the steps, not repetitions', describeSessionOutcome(base).includes('3'), describeSessionOutcome(base));
+    check('it does not claim a repetition count', !/\breps?\b/i.test(describeSessionOutcome(base)), describeSessionOutcome(base));
+    check('it does not claim a measurement', !/score|stead|angle|degree|pace|range/i.test(describeSessionOutcome(base)), describeSessionOutcome(base));
+
+    const finished = { ...base, stepsCompleted: activity.steps.length };
+    check('a finished routine says so by naming every one of its steps', describeSessionOutcome(finished) === `${activity.steps.length} of ${activity.steps.length} ${activity.progressNoun}`, describeSessionOutcome(finished));
+
+    const oneStep = { ...base, stepsCompleted: 1 };
+    check('one step of many is not pluralised into nonsense', !/1 poses\b/.test(describeSessionOutcome(oneStep)), describeSessionOutcome(oneStep));
+
+    check('a camera session still reads as a count of exercises', describeSessionOutcome({
+      ...base,
+      exerciseId: 'seated-knee-extension',
+      exerciseName: 'Seated Knee Extension',
+      activityKind: undefined,
+      stepsCompleted: undefined,
+      reps: 5,
+    }).includes('5'), 'camera wording');
+  });
+
+  suite('activity wording: a step position is never out of range', () => {
+    check('the first step reads as 1', describeStepPosition(0, 6, 'poses').includes('1'), describeStepPosition(0, 6, 'poses'));
+    check('a partial count reads as the next one', describeStepPosition(2, 6, 'poses').includes('3'), describeStepPosition(2, 6, 'poses'));
+    check('a count past the end is clamped', describeStepPosition(99, 6, 'poses').includes('6'), describeStepPosition(99, 6, 'poses'));
+    check('a negative count is not printed', !/-\d/.test(describeStepPosition(-2, 6, 'poses')), describeStepPosition(-2, 6, 'poses'));
+  });
+
+  // ==========================================================================
+  // Today's status
+  // ==========================================================================
+  suite('today: done is read from real finished sessions, never stored twice', () => {
+    const items = BY_KIND.wellness;
+    const now = new Date(2026, 8, 28, 14, 0, 0);
+    const todayNoon = new Date(2026, 8, 28, 12, 0, 0).toISOString();
+    const yesterdayNoon = new Date(2026, 8, 27, 12, 0, 0).toISOString();
+
+    const record = (over: Partial<SessionRecord>): SessionRecord => ({
+      id: 'r',
+      exerciseId: items[0].id,
+      exerciseName: items[0].name,
+      completedAt: todayNoon,
+      reps: 0,
+      durationSeconds: 90,
+      paceRpm: null,
+      rangeMinDeg: null,
+      rangeMaxDeg: null,
+      consistencyPct: null,
+      activityKind: 'wellness',
+      ...over,
+    });
+
+    const yesterdayOnly = todayStatus([record({ completedAt: yesterdayNoon })], items, 'wellness', now);
+    check('yesterday does not count as today', yesterdayOnly.every((s) => !s.done), yesterdayOnly.filter((s) => s.done).length);
+    check('yesterday is still a real session, just not today\'s', yesterdayOnly.length === items.length);
+
+    const status = todayStatus(
+      [
+        record({ id: 'a' }),
+        record({ id: 'b', completedAt: yesterdayNoon, exerciseId: items[1].id }),
+        record({ id: 'c', exerciseId: items[1].id }),
+        record({ id: 'd', activityKind: 'yoga' }),
+        record({ id: 'e', activityKind: undefined }),
+      ],
+      items,
+      'wellness',
+      now,
+    );
+
+    check('done once reads as done once', status.find((s) => s.activityId === items[0].id)?.timesToday === 1, status.find((s) => s.activityId === items[0].id)?.timesToday);
+    check('done twice reads as twice', status.find((s) => s.activityId === items[1].id)?.timesToday === 1, status.find((s) => s.activityId === items[1].id)?.timesToday);
+    check('a yoga session is not a wellness one', status.filter((s) => s.done).length === 2, status.filter((s) => s.done).length);
+    check('every activity in the list gets an answer', status.length === items.length);
+
+    const counts = countDoneToday(status);
+    check('the count is real', counts.done === 2 && counts.total === items.length, `${counts.done}/${counts.total}`);
+
+    check('an empty history is all not-done', countDoneToday(todayStatus([], items, 'wellness', now)).done === 0);
+    check('a session from another year is not today', todayStatus([record({ completedAt: '2020-01-01T12:00:00.000Z' })], items, 'wellness', now).every((s) => !s.done));
+    check('an unparseable date does not crash the read', todayStatus([record({ completedAt: 'not a date' })], items, 'wellness', now).every((s) => !s.done));
+    check('a record for an id not in the list adds nothing', todayStatus([record({ exerciseId: 'gone-from-the-catalogue' })], items, 'wellness', now).filter((s) => s.done).length === 0);
+  });
+
+  // ==========================================================================
+  // Route params
+  // ==========================================================================
+  suite('result params: a value from a link cannot become a claim', () => {
+    check('a whole number is accepted', wholeNumberParam('5') === 5);
+    check('a decimal is refused', wholeNumberParam('5.5') === null);
+    check('a negative number is refused', wholeNumberParam('-1') === null);
+    check('words are refused', wholeNumberParam('lots') === null);
+    check('an empty value is refused', wholeNumberParam('') === null);
+    check('a missing value is refused', wholeNumberParam(undefined) === null);
+    check('a very long number is refused rather than truncated', wholeNumberParam('9'.repeat(30)) === null);
+
+    check('a step count is a whole count', parseStepCountParam('3') === 3);
+    check('a step count of zero is allowed', parseStepCountParam('0') === 0);
+    check('a step count that is not a number is refused', parseStepCountParam('three') === null);
+    check('a step count is passed through unchanged', parseStepCountParam('99') === 99);
+
+    check('seconds are read as a count of seconds', parseSecondsParam('120') === 120);
+    check('zero seconds is allowed', parseSecondsParam('0') === 0);
+    check('negative seconds are refused', parseSecondsParam('-30') === null);
+  });
+
+  // ==========================================================================
+  // The kind guard
+  // ==========================================================================
+  suite('guided kinds: the camera case is deliberately not one of them', () => {
+    check('exercise is not a guided kind', !isGuidedActivityKind('exercise'));
+    for (const kind of GUIDED_ACTIVITY_KINDS) {
+      check(`${kind} is a guided kind`, isGuidedActivityKind(kind));
+    }
+    check('a kind that does not exist is not accepted', !isGuidedActivityKind('swimming'));
+    check('a non-string is not accepted', !isGuidedActivityKind(7));
+  });
+}

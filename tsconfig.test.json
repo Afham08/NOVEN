@@ -13,6 +13,11 @@
     "noEmit": false,
     "outDir": "build-tests"
   },
-  "include": ["tests/**/*.ts", "src/exercise/**/*.ts"],
+  "include": [
+    "tests/**/*.ts",
+    "src/exercise/**/*.ts",
+    "src/activities/**/*.ts",
+    "src/settings/theme-preference.ts"
+  ],
   "exclude": ["node_modules"]
 }

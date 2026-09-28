@@ -14,9 +14,9 @@ import { Header } from '@/components/ui/header';
 import { StatusChip } from '@/components/ui/status-chip';
 import { Radius, Spacing, Type } from '@/constants/theme';
 import { getExerciseById } from '@/data/exercises';
-import { SEATED_KNEE_EXTENSION } from '@/exercise/configs';
 import { completedFeedback, pausedFeedback, setupFeedback, type FeedbackCue } from '@/exercise/feedback';
 import { buildSessionMetrics, formatConsistencyLabel, formatDurationLabel, formatPaceLabel, formatRangeLabel } from '@/exercise/metrics';
+import { getExerciseConfig } from '@/exercise/pose-configs';
 import { createSessionId, createSessionRecord } from '@/exercise/session-store';
 import { sessionStore } from '@/exercise/session-storage';
 import { SessionEngine } from '@/exercise/session-engine';
@@ -57,12 +57,25 @@ export default function SessionScreen() {
     setPhase(next);
   }, []);
 
+  const config = getExerciseConfig(id);
+
   /**
    * The whole per-frame exercise pipeline lives in SessionEngine (pure, and unit
    * tested); this screen only owns the session phase, the camera, and the HUD.
+   *
+   * The config comes from the catalogue id in the route, so every movement NOVEN
+   * has real thresholds for runs on this one screen. An id with no config cannot
+   * reach here: the exercise list and the detail screen both check first and
+   * refuse to start a camera session they have no thresholds for.
+   *
+   * Built once, from that config, and never rebuilt: the engine is a stateful
+   * object that accumulates every frame of the session, so replacing it
+   * mid-session would throw the whole thing away. A lazy useState initialiser is
+   * what gives "constructed exactly once" without touching a ref during render.
    */
-  const engineRef = useRef<SessionEngine | null>(null);
-  if (engineRef.current === null) engineRef.current = new SessionEngine(SEATED_KNEE_EXTENSION);
+  const [engine] = useState<SessionEngine | null>(() =>
+    config === undefined ? null : new SessionEngine(config),
+  );
 
   /**
    * Voice is a second channel for the SAME per-frame decision the HUD renders,
@@ -100,7 +113,7 @@ export default function SessionScreen() {
   const leaveSession = () => {
     if (leavingRef.current) return;
     leavingRef.current = true;
-    router.replace('/exercise');
+    router.replace('/');
   };
 
   useEffect(() => {
@@ -167,7 +180,6 @@ export default function SessionScreen() {
       // that arrive while paused, before Start, or after End are dropped here and
       // never reach the engine, so a late frame cannot revive a finished session.
       if (phaseRef.current !== 'running') return;
-      const engine = engineRef.current;
       if (!engine) return;
       const result = engine.handlePoseFrame(event);
       updateHud(result);
@@ -175,10 +187,10 @@ export default function SessionScreen() {
       // value, and the controller decides whether that decision is worth saying.
       voiceRef.current?.onFrame(result);
     },
-    [updateHud],
+    [engine, updateHud],
   );
 
-  if (!exercise) {
+  if (!exercise || config === undefined) {
     return (
       <Screen>
         <Header title="Session not found" />
@@ -188,7 +200,7 @@ export default function SessionScreen() {
   }
 
   const start = () => {
-    engineRef.current?.reset();
+    engine?.reset();
     // Clear any throttling left over from a previous attempt so the first cue of
     // the new session is not swallowed by a cooldown.
     voiceRef.current?.reset();
@@ -204,7 +216,6 @@ export default function SessionScreen() {
     // cannot be completed by the frames that follow it. Counted reps survive.
     // The HUD is not updated while paused (no pose frames are consumed), so the
     // engine also releases any held praise here instead of leaving it on screen.
-    const engine = engineRef.current;
     if (engine) updateHud(engine.pause());
     goToPhase('paused');
     voiceRef.current?.announcePause();
@@ -224,7 +235,6 @@ export default function SessionScreen() {
     // the result screen) must not push a duplicate result or re-open counting.
     if (phaseRef.current === 'completed') return;
 
-    const engine = engineRef.current;
     const range = engine?.observedRange ?? null;
 
     const metrics = buildSessionMetrics({

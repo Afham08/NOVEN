@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 
+import { describeSessionOutcome } from '@/activities/activity-format';
 import { Card } from '@/components/ui/card';
 import { Spacing, Type } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
@@ -25,6 +26,10 @@ const DEFAULT_LIMIT = 10;
 /**
  * "5 exercises completed" / "1 exercise completed" — the same plain phrasing the
  * Result screen's hero uses, so the two never disagree about the same session.
+ *
+ * Kept for the camera sessions, which are the ones that have a count. A guided
+ * session counted no repetitions, so `describeSessionOutcome` is what phrases
+ * those, and it phrases them by what they actually did.
  */
 export function describeCompletedCount(reps: number): string {
   return `${reps} ${reps === 1 ? 'exercise' : 'exercises'} completed`;
@@ -39,6 +44,11 @@ export function describeCompletedCount(reps: number): string {
  * session really produced; nothing is scored, rated, or described in clinical
  * language, and a metric the engine could not measure is simply not shown rather
  * than shown as a zero.
+ *
+ * The list holds every kind of session, not only camera ones, because they all
+ * end up in the same history and a list that quietly hid half of them would be
+ * the wrong list. Each row is described by what that session actually did, so a
+ * finished yoga routine reads as poses rather than as zero repetitions.
  *
  * A row is a whole pressable target, because the audience may be tapping with a
  * finger that is not precise.
@@ -77,9 +87,10 @@ export function SessionHistory({ store, onOpenSession, limit = DEFAULT_LIMIT }: 
   if (visible.length === 0) {
     return (
       <Card variant="surface" gap={Spacing.two}>
-        <Text style={[styles.emptyTitle, { color: theme.heading }]}>No exercise sessions yet</Text>
+        <Text style={[styles.emptyTitle, { color: theme.heading }]}>No sessions yet</Text>
         <Text style={[styles.emptyBody, { color: theme.textSecondary }]}>
-          Complete an exercise session and your progress will appear here.
+          Finish an exercise, a yoga routine, or a calm moment, and it will appear
+          here.
         </Text>
       </Card>
     );
@@ -128,7 +139,7 @@ function HistoryRow({
         <View style={styles.statRow}>
           {/* The count is the headline number, matching the Result screen. */}
           <Text style={[styles.count, { color: theme.accent }]}>
-            {describeCompletedCount(record.reps)}
+            {describeSessionOutcome(record)}
           </Text>
           <Text style={[styles.duration, { color: theme.textSecondary }]}>
             {formatDurationLabel(record.durationSeconds)}

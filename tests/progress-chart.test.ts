@@ -136,17 +136,30 @@ export function run() {
   suite('progress: the score card hint matches the real state', () => {
     check('loading reads as loading, not as zero', progressHint(null, null) === 'Reading your saved sessions.');
 
-    const empty = { points: [], sessionsInWindow: 0, scoredInWindow: 0, latest: null, average: null, highest: null, lowest: null, windowStartDayKey: '2026-08-30', windowDays: 30 };
+    const empty = { points: [], sessionsInWindow: 0, scoredInWindow: 0, guidedInWindow: 0, latest: null, average: null, highest: null, lowest: null, windowStartDayKey: '2026-08-30', windowDays: 30 };
     check('no sessions says so', progressHint(empty, 0).includes('No sessions'));
     check('sessions but none recent says so', progressHint(empty, 4).includes('No sessions'));
 
     const unscoreable = { ...empty, sessionsInWindow: 2, scoredInWindow: 0 };
     check('sessions that cannot be scored are not called zero', progressHint(unscoreable, 2).includes('too short'), progressHint(unscoreable, 2));
 
+    /*
+     * A month of guided sessions and no camera ones is a different situation from
+     * a month of camera sessions that were too short, and the wording must not
+     * offer "too short to measure" as the reason for something that was never
+     * measured.
+     */
+    const onlyGuided = { ...empty, sessionsInWindow: 3, guidedInWindow: 3 };
+    check('guided sessions are not called too short', !progressHint(onlyGuided, 3).includes('too short'), progressHint(onlyGuided, 3));
+    check('guided sessions say they were not measured by the camera', progressHint(onlyGuided, 3).includes('not measured by the camera'), progressHint(onlyGuided, 3));
+    const mixed = { ...empty, sessionsInWindow: 5, guidedInWindow: 3 };
+    check('a mix points at the camera as the thing that would add a score', progressHint(mixed, 5).includes('with the camera'), progressHint(mixed, 5));
+
     const scored = {
       points: [{ id: 'a', completedAt: new Date().toISOString(), dayKey: '2026-09-28', score: 84 }],
       sessionsInWindow: 1,
       scoredInWindow: 1,
+      guidedInWindow: 0,
       latest: { id: 'a', completedAt: new Date().toISOString(), dayKey: '2026-09-28', score: 84 },
       average: 84,
       highest: 84,
@@ -155,6 +168,7 @@ export function run() {
       windowDays: 30,
     };
     check('a real score names the real scale', progressHint(scored, 1) === `Steadiness of your latest session, out of ${PROGRESS_MAX}.`, progressHint(scored, 1));
+    check('a scored session alongside guided ones still names the real scale', progressHint({ ...scored, sessionsInWindow: 3, guidedInWindow: 2 }, 3) === `Steadiness of your latest session, out of ${PROGRESS_MAX}.`);
     check('the hint never promises a clinical claim', !/health|medical|diagnos|risk|rehab/i.test(progressHint(scored, 1)));
   });
 }

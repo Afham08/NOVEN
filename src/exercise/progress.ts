@@ -116,6 +116,16 @@ export type ProgressSummary = {
   sessionsInWindow: number;
   /** Sessions inside the window that produced a score. */
   scoredInWindow: number;
+  /**
+   * Guided sessions inside the window — yoga, meditation, wellness.
+   *
+   * Counted, never plotted. They were not measured by the camera, so they have no
+   * steadiness to place on the axis, and this count exists so the wording under
+   * the score card can tell "you did not exercise with the camera" apart from
+   * "you exercised for too short a time to measure", which are different
+   * situations and would otherwise be described by one wrong sentence.
+   */
+  guidedInWindow: number;
   /** Most recent scoreable session. */
   latest: ProgressPoint | null;
   /** Mean of the plotted scores, rounded. Null when nothing is plotted. */
@@ -133,7 +143,18 @@ export type ProgressInput = Pick<
 > & {
   id: string;
   completedAt: string;
+  /**
+   * Which kind of session this is. Absent on every camera session and on any
+   * record written before guided activities existed, so it is optional and
+   * optional here too.
+   */
+  activityKind?: string;
 };
+
+/** True for a record the camera never watched, so no steadiness can exist for it. */
+function isGuidedSession(record: ProgressInput): boolean {
+  return record.activityKind !== undefined && record.activityKind !== 'exercise';
+}
 
 /**
  * Turns stored session history into the series the chart draws.
@@ -175,7 +196,19 @@ export function buildProgress(
     });
 
   const points: ProgressPoint[] = [];
+  let guidedInWindow = 0;
   for (const record of inWindow) {
+    if (isGuidedSession(record)) {
+      /*
+       * A guided session is counted and then skipped. It has no
+       * `consistencyPct` — buildSessionMetrics returned null for every camera
+       * field, because a timer watched nothing — so `progressScoreFor` would
+       * return null for it anyway. Counting it separately makes the distinction
+       * explicit rather than relying on a null to carry meaning.
+       */
+      guidedInWindow += 1;
+      continue;
+    }
     const score = progressScoreFor(record);
     if (score === null) continue;
     points.push({
@@ -193,6 +226,7 @@ export function buildProgress(
     points,
     sessionsInWindow: inWindow.length,
     scoredInWindow: points.length,
+    guidedInWindow,
     latest: points.length > 0 ? points[points.length - 1] : null,
     average: scores.length > 0 ? Math.round(sum / scores.length) : null,
     highest: scores.length > 0 ? Math.max(...scores) : null,
@@ -218,6 +252,17 @@ export function progressHint(
     return 'No sessions in the last 30 days yet.';
   }
   if (summary.scoredInWindow === 0) {
+    /*
+     * Two genuinely different reasons there is nothing to plot, and only one of
+     * them is about the sessions being short. Yoga, meditation and wellness were
+     * not watched by the camera at all, so "too short to measure" would be a
+     * wrong reason offered for a correct outcome.
+     */
+    if (summary.guidedInWindow > 0) {
+      return summary.sessionsInWindow === summary.guidedInWindow
+        ? 'Your last 30 days were yoga, meditation or wellness. Those are not measured by the camera.'
+        : 'An exercise with the camera would add a score here.';
+    }
     return 'Sessions this month were too short to measure.';
   }
   const latest = summary.latest;

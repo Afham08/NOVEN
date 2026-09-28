@@ -13,6 +13,12 @@ export type ButtonProps = PressableProps & {
   size?: ButtonSize;
   /** Optional leading element (e.g. an icon) shown before the label. */
   leading?: ReactNode;
+  /**
+   * Optional trailing element shown after the label — a tick, a value, a chevron.
+   * Used by selection rows, where the mark of "this one is chosen" belongs on the
+   * same target as the choice rather than on a smaller thing beside it.
+   */
+  right?: ReactNode;
   loading?: boolean;
   /** Stretch to full available width. Defaults to `true`. */
   fullWidth?: boolean;
@@ -34,6 +40,7 @@ export function Button({
   variant = 'primary',
   size = 'large',
   leading,
+  right,
   loading = false,
   fullWidth = true,
   disabled,
@@ -63,12 +70,15 @@ export function Button({
         style,
       ]}
       {...rest}>
-      {loading ? (
-        <ActivityIndicator color={foreground} />
-      ) : (
-        leading
-      )}
-      <Text style={[styles.label, { color: foreground }, LABEL_STYLES[size]]}>{title}</Text>
+        {loading ? (
+          <ActivityIndicator color={foreground} />
+        ) : (
+          <>
+            {leading}
+            <Text style={[styles.label, { color: foreground }, LABEL_STYLES[size]]}>{title}</Text>
+            {right}
+          </>
+        )}
     </Pressable>
   );
 }

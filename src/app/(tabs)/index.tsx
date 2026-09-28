@@ -6,10 +6,9 @@ import { ActivityCard } from '@/components/cards/activity-card';
 import { ScoreCard } from '@/components/cards/score-card';
 import { Screen } from '@/components/layout/screen';
 import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
 import { Header } from '@/components/ui/header';
 import { SectionHeader } from '@/components/ui/section-header';
-import { Radius, Spacing } from '@/constants/theme';
+import { Radius } from '@/constants/theme';
 import { useProgress } from '@/hooks/use-progress';
 import { useTheme } from '@/hooks/use-theme';
 import { progressHint } from '@/exercise/progress';
@@ -106,22 +105,6 @@ export default function HomeScreen() {
         }
         onPress={() => router.push('/settings')}
       />
-
-      <SectionHeader accent title="Primitives" subtitle="Design system building blocks in use." />
-
-      <Card variant="sage" gap={Spacing.three}>
-        <Button
-          variant="primary"
-          title="Start a session"
-          onPress={() => router.push('/exercise')}
-        />
-        <Button variant="secondary" title="Open settings" onPress={() => router.push('/settings')} />
-        <Button
-          variant="outline"
-          title="Review result"
-          onPress={() => router.push('/exercise/result')}
-        />
-      </Card>
     </Screen>
   );
 }

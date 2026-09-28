@@ -292,10 +292,19 @@ export function run() {
     check('the exercise list still starts a session', exerciseList.includes('router.push(`/exercise/${exercise.id}`)'));
 
     // Home still reaches the things it always reached.
+    //
+    // It used to also link straight to `/exercise` and `/exercise/result` through
+    // a "Primitives" block that existed to demonstrate the design system. That
+    // block is gone: it was not a thing a person can do, and one of its buttons
+    // opened the result screen with no session behind it. Home reaches the
+    // activities through Activities, which is the tab that lists all four, so the
+    // check is that those three routes are all still there.
     const home = read('(tabs)', 'index.tsx');
-    check('Home still links to the exercise list', home.includes("router.push('/exercise')"));
-    check('Home still links to the result screen', home.includes("router.push('/exercise/result')"));
     check('Home links to Activities', home.includes("router.navigate('/activities')"));
+    check('Home links to Progress', home.includes("router.navigate('/progress')"));
+    check('Home links to Settings', home.includes("router.push('/settings')"));
+    check('Home no longer opens a result screen with nothing behind it', !home.includes("router.push('/exercise/result')"), home);
+    check('Home has no leftover design-system block', !/Primitives/.test(stripComments(home)), stripComments(home));
   });
 
   suite('settings: every section is reachable and registered', () => {
@@ -392,8 +401,13 @@ export function run() {
 
     // --- What was removed: intro copy that restated the title. ---
     check('Settings has no introductory subtitle', !/subtitle=/.test(read('settings', 'index.tsx')));
+    // Language is a list of rows, so it needs no prose at all. Appearance now has
+    // exactly one Text — the "Selected" marker, which is a state indicator rather
+    // than a paragraph — so the check is narrowed to what it was protecting: no
+    // subtitle prop, and no prose beyond the marker.
     check('Language has no explanatory paragraph', !/subtitle=|<Text/.test(language), language);
-    check('Appearance has no explanatory paragraph', !/subtitle=|<Text/.test(appearance), appearance);
+    check('Appearance has no explanatory paragraph', !/subtitle=/.test(appearance), appearance);
+    check("Appearance's only text is the selection marker", (stripComments(appearance).match(/<Text/g) ?? []).length === 1, stripComments(appearance).match(/<Text/g));
     // Comments are stripped first: the file explains in a comment that this
     // paragraph was removed, and the test must not read that explanation as the
     // paragraph itself.
@@ -409,11 +423,18 @@ export function run() {
     check('Language still shows the real language', language.includes('value="English"'));
     check('Language still says it cannot be changed', /not available yet/i.test(language));
 
-    // Appearance still marks the one option in use, so the screen is not three
-    // identical dead rows.
-    check('Appearance still marks the option in use', appearance.includes('"In use now"'));
-    check('Appearance still marks the others as coming soon', /Coming soon/.test(appearance));
-    check('Appearance still reports what is showing now', /Showing right now/.test(appearance));
+    // Appearance is a REAL setting now, so the check is that it works rather than
+    // that it admits it does not. The rows must be marked by the stored
+    // preference, and nothing may claim a choice is coming.
+    //
+    // Comments are stripped for the wording checks: this file explains in a
+    // comment that the "Coming soon" label is gone, and reading that explanation
+    // as though it were still on screen is exactly the false positive the
+    // stripComments helper exists to prevent.
+    check('Appearance marks the option in use', /right=\{\s*preference === option\.value/.test(stripComments(appearance)), stripComments(appearance));
+    check('Appearance is driven by the stored preference', /preference === option\.value/.test(appearance), appearance);
+    check('Appearance no longer claims choosing is unavailable', !/not available yet|Coming soon/i.test(stripComments(appearance)), stripComments(appearance));
+    check('Appearance adds no explanation of its own', !/Colours only/.test(stripComments(appearance)), stripComments(appearance));
 
     // Notifications keeps its one message: that nothing is sent at all.
     check('Notifications still says nothing is sent', /does not send reminders/i.test(notifications));
@@ -425,7 +446,9 @@ export function run() {
     check('Privacy still explains when the camera is asked for', /only when you start an exercise session/i.test(privacy));
     check('Privacy still says what the camera is used for', /only to watch the movement/i.test(privacy));
     check('Privacy still says history stays on the phone', /not sent anywhere/i.test(privacy));
-    check('Privacy still says it cannot be changed yet', /not available yet/i.test(privacy));
+    // Deletion is implemented, so Privacy no longer says it cannot be changed.
+    check('Privacy now offers to delete the saved sessions', /Delete all saved sessions/.test(privacy), privacy);
+    check('Privacy no longer says it cannot be changed yet', !/not available yet/i.test(stripComments(privacy)), stripComments(privacy));
 
     // About keeps the three real values.
     check('About still reads the version from config', about.includes('Constants.expoConfig'));
@@ -438,15 +461,18 @@ export function run() {
     check('Family still says nothing was added', /nothing was added/i.test(family));
 
     // --- Coming Soon labels stay where functionality truly does not exist. ---
+    // Appearance and Privacy are deliberately absent from this list: both are now
+    // real settings that do what they say, and leaving them here would have
+    // asserted a limitation the app no longer has.
     for (const [name, source] of [
       ['language', language],
-      ['appearance', appearance],
       ['notifications', notifications],
-      ['privacy', privacy],
       ['family', family],
     ] as const) {
       check(`${name} still carries a Coming Soon label`, /not available yet|Coming soon/i.test(source), source);
     }
+    check('appearance is no longer a Coming Soon screen', !/not available yet|Coming soon/i.test(stripComments(appearance)), stripComments(appearance));
+    check('privacy is no longer a Coming Soon screen', !/not available yet|Coming soon/i.test(stripComments(privacy)), stripComments(privacy));
 
     // --- Titles are untouched, which is the whole premise of the cleanup. ---
     const titles: Array<[string, string, string]> = [
@@ -495,12 +521,15 @@ export function run() {
     const privacy = read('settings', 'privacy.tsx');
     const about = read('settings', 'about.tsx');
 
-    // Appearance must offer the three options the design calls for.
-    for (const option of ['Light', 'Dark', 'System default']) {
-      check(`Appearance offers ${option}`, appearance.includes(`label="${option}"`));
+    // Appearance must offer the three options the design calls for, and now they
+    // have to be the real ones: the stored values, not display labels.
+    for (const option of ['Light', 'Dark', 'Same as my phone']) {
+      check(`Appearance offers ${option}`, appearance.includes(`label: '${option}'`));
     }
-    check('Appearance marks System default as the one in use', appearance.includes('"In use now"'));
-    check('Appearance is honest that choosing is not available', /not available yet/i.test(appearance));
+    for (const value of ["'system'", "'light'", "'dark'"]) {
+      check(`Appearance can actually set ${value}`, new RegExp(`value: ${value}`).test(appearance), appearance);
+    }
+    check('Appearance stores the choice rather than only marking it', /setPreference\(option\.value\)/.test(appearance), appearance);
 
     // A switch that changes nothing is the failure mode to avoid everywhere.
     for (const [name, source] of [
@@ -512,8 +541,23 @@ export function run() {
     ] as const) {
       const code = stripComments(source);
       check(`${name} renders no Switch or Toggle`, !/Switch|Toggle|Radio/.test(code));
+    }
+
+    /*
+     * State used to fake a setting is the failure. State used to DO a setting is
+     * the fix, so this now only holds for the screens that have no real work to
+     * do — and Appearance and Privacy are checked below for doing theirs.
+     */
+    for (const [name, source] of [
+      ['language', language],
+      ['notifications', notifications],
+      ['about', about],
+    ] as const) {
+      const code = stripComments(source);
       check(`${name} uses no state to fake a setting`, !/useState/.test(code));
     }
+    check('Appearance keeps its real choice, not a fake one', /useThemePreference\(\)/.test(stripComments(appearance)), stripComments(appearance));
+    check('Privacy keeps its real deletion, not a fake one', /sessionStore[\s\S]*clearSessions/.test(stripComments(privacy)), stripComments(privacy));
 
     // Language reports the one real answer.
     check('Language states the current language', language.includes('value="English"'));

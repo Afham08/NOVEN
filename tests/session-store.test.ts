@@ -419,8 +419,11 @@ export function run(): void {
     }
 
     // The empty state must invite the first session rather than imply a lack.
-    check('the empty state says there are none yet', code.includes('No exercise sessions yet'));
-    check('and explains what will fill it', code.includes('Complete an exercise session'));
+    // It also names every kind of session now, because all four land in this one
+    // list — saying "exercise sessions" would be wrong for somebody whose only
+    // session so far has been a yoga routine.
+    check('the empty state says there are none yet', code.includes('No sessions yet'));
+    check('and explains what will fill it', code.includes('Finish an exercise, a yoga routine, or a calm moment'));
 
     // The count is phrased the same way the Result screen phrases it, so the two
     // never disagree about the same session.

@@ -6,6 +6,7 @@ import { Screen } from '@/components/layout/screen';
 import { Header } from '@/components/ui/header';
 import { SectionHeader } from '@/components/ui/section-header';
 import { useTheme } from '@/hooks/use-theme';
+import { guidedCatalog } from '@/activities/catalog';
 import { exercisesCatalog } from '@/data/exercises';
 
 /**
@@ -25,7 +26,8 @@ import { exercisesCatalog } from '@/data/exercises';
  * The cards are ordered the way a day goes: move, stretch, settle, and check in.
  * Each one leads to the screen that already existed, so nothing about Exercise,
  * Yoga, Meditation or Wellness changes here — the only honest thing to say about
- * the three that are not built yet is what they were always going to say.
+ * a section is what it actually offers, which is now counted from the real
+ * catalogues at the bottom of this page rather than promised in a subtitle.
  */
 const ACTIVITIES = [
   {
@@ -43,7 +45,7 @@ const ACTIVITIES = [
   {
     name: 'yoga',
     title: 'Yoga',
-    description: 'Gentle practice for every body',
+    description: 'Gentle seated routines, step by step',
     rightLabel: 'Open',
     tint: 'sage' as const,
     icon: {
@@ -55,7 +57,7 @@ const ACTIVITIES = [
   {
     name: 'meditation',
     title: 'Meditation',
-    description: 'Short calm moments, anytime',
+    description: 'Short calm moments, one minute to ten',
     rightLabel: 'Open',
     tint: 'sage' as const,
     icon: {
@@ -67,7 +69,7 @@ const ACTIVITIES = [
   {
     name: 'wellness',
     title: 'Wellness',
-    description: 'How your movement is going over time',
+    description: 'Small things to do today, under two minutes',
     rightLabel: 'Open',
     tint: 'accent' as const,
     icon: {
@@ -113,12 +115,15 @@ export default function ActivitiesScreen() {
       ))}
 
       {/*
-        An honest count, read from the real catalogue rather than typed in, so it
-        cannot drift away from what is actually available to start.
+        An honest count, read from the real catalogues rather than typed in, so it
+        cannot drift away from what is actually available to start. The guided
+        activities are listed by their own lengths too, because "how long is
+        this" is the first question about a routine and the answer belongs next
+        to it.
       */}
-      <SectionHeader accent title="Getting started" />
+      <SectionHeader accent title="Ready to start" />
       <ActivityCard
-        title="Exercises ready to try"
+        title="Exercises with your camera"
         description={
           exercisesCatalog.length === 1
             ? 'One guided movement session is ready now.'
@@ -126,6 +131,24 @@ export default function ActivitiesScreen() {
         }
         rightLabel="See all"
         onPress={() => router.push('/exercise')}
+      />
+      <ActivityCard
+        title="Yoga routines"
+        description={`${guidedCatalog('yoga').length} seated routines, timed for you.`}
+        rightLabel="Open"
+        onPress={() => router.push('/yoga')}
+      />
+      <ActivityCard
+        title="Meditation sessions"
+        description={`${guidedCatalog('meditation').length} options, one minute to ten.`}
+        rightLabel="Open"
+        onPress={() => router.push('/meditation')}
+      />
+      <ActivityCard
+        title="Wellness activities"
+        description={`${guidedCatalog('wellness').length} small things to do today.`}
+        rightLabel="Open"
+        onPress={() => router.push('/wellness')}
       />
     </Screen>
   );
