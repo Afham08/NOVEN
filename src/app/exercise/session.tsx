@@ -17,6 +17,8 @@ import { getExerciseById } from '@/data/exercises';
 import { SEATED_KNEE_EXTENSION } from '@/exercise/configs';
 import { completedFeedback, pausedFeedback, setupFeedback, type FeedbackCue } from '@/exercise/feedback';
 import { buildSessionMetrics, formatConsistencyLabel, formatDurationLabel, formatPaceLabel, formatRangeLabel } from '@/exercise/metrics';
+import { createSessionId, createSessionRecord } from '@/exercise/session-store';
+import { sessionStore } from '@/exercise/session-storage';
 import { SessionEngine } from '@/exercise/session-engine';
 import { createExpoSpeechSink, VoiceFeedbackController } from '@/exercise/voice-feedback';
 
@@ -242,6 +244,42 @@ export default function SessionScreen() {
     // Announced before navigating. The controller is terminal from here, so this
     // is the last thing ever spoken for this session.
     voiceRef.current?.announceCompletion(metrics.reps);
+
+    /*
+     * Record the finished session so it can be seen again from the home screen.
+     *
+     * THIS IS THE ONLY PLACE A SESSION IS SAVED, and it sits below the terminal
+     * guard at the top of this function, so every way of arriving twice is
+     * already covered: a double tap on End returns early, a re-render does not
+     * re-run this callback, back-navigation from the result screen finds
+     * `phaseRef.current` already 'completed', and the result screen itself never
+     * saves. The store also replaces rather than appends on a repeated id, so
+     * even a re-entrant call could not produce a duplicate.
+     *
+     * The RAW metrics are stored, not the formatted strings below, so nothing
+     * display-shaped is written to disk and the history can be re-rendered at any
+     * text size without a re-save.
+     *
+     * Fire-and-forget, deliberately. A slow or failing write must not delay the
+     * result screen, and the result screen reads the same numbers from the route
+     * params whether or not the write landed. The rejection is absorbed for the
+     * same reason the voice controller absorbs its own: the session really did
+     * happen and the user really did get their result, so a storage failure
+     * degrades the history list rather than the session.
+     */
+    void sessionStore
+      .saveSession(
+        createSessionRecord({
+          id: createSessionId(),
+          exerciseId: exercise.id,
+          exerciseName: exercise.name,
+          completedAt: new Date().toISOString(),
+          metrics,
+        }),
+      )
+      .catch(() => {
+        // Intentionally swallowed — see above.
+      });
 
     router.push({
       pathname: '/exercise/result',
