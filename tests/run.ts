@@ -3,6 +3,7 @@ import { awaitAllSuites, report } from './harness';
 import { run as runActivities } from './activities.test';
 import { run as runActivityFlow } from './activity-flow.test';
 import { run as runMetrics } from './metrics.test';
+import { run as runMeditationGuidance } from './meditation-guidance.test';
 import { run as runPoseStream } from './pose-stream.test';
 import { run as runPoseUtils } from './pose-utils.test';
 import { run as runProgress } from './progress.test';
@@ -20,6 +21,7 @@ async function main(): Promise<void> {
   runActivities();
   runActivityFlow();
   runMetrics();
+  runMeditationGuidance();
   runPoseUtils();
   runRepDetector();
   runRepAggregation();

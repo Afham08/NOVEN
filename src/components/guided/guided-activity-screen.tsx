@@ -9,6 +9,10 @@ import {
 
 import { describeLength, describeStepPosition } from '@/activities/activity-format';
 import { GuidedSession, type GuidedSnapshot } from '@/activities/guided-session';
+import {
+  MeditationPostureTracker,
+  type MeditationGuidance,
+} from '@/activities/meditation-guidance';
 import type { GuidedActivity } from '@/activities/types';
 import { buildSessionMetrics } from '@/exercise/metrics';
 import { createSessionId, createSessionRecord } from '@/exercise/session-store';
@@ -92,6 +96,36 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
   /** Whether we're currently on a camera-tracked step. */
   const isCameraStep = currentStepConfig !== undefined;
 
+  /** Whether the current activity is meditation (for camera HUD customization). */
+  const isMeditation = activity.kind === 'meditation';
+
+  /**
+   * Whether the live camera preview should be mounted right now.
+   *
+   * `hasCameraPermission` is tri-state and starts as `null`, so it is compared
+   * against `true` rather than used as a boolean: a null would otherwise read
+   * as "denied" and flash the no-camera placeholder at someone who is about to
+   * be asked.
+   *
+   * Meditation needs no engine, so it does not wait for one.
+   */
+  const showCameraPreview =
+    isCameraStep && running && hasCameraPermission === true && (isMeditation || hasCameraEngine);
+
+  /**
+   * Posture guidance for a camera step. Held in a ref because it is stateful -
+   * it carries the settling window between frames - and a fresh instance per
+   * render would restart that window on every tick and never settle.
+   */
+  const postureTrackerRef = useRef(new MeditationPostureTracker());
+
+  /**
+   * What the meditation camera HUD is currently showing. `null` before the first
+   * pose frame arrives, which the HUD renders as a neutral holding message
+   * rather than as an assessment nobody has made yet.
+   */
+  const [postureGuidance, setPostureGuidance] = useState<MeditationGuidance | null>(null);
+
   /**
    * Stable on purpose: these three are dependencies of the effects below and of
    * each other, and a fresh function every render would make all of them churn
@@ -117,6 +151,16 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
   }, [session]);
 
   /**
+   * Whether this activity asks for the camera at all.
+   *
+   * Wellness has no camera step, so asking on its behalf would put a camera
+   * prompt in front of somebody for a session that never uses one. Computed
+   * from the activity's own steps, which never change for a mounted screen, so
+   * the permission effect below does not re-run.
+   */
+  const usesCamera = activity.steps.some((step) => step.cameraConfigId !== undefined);
+
+  /**
    * Request camera permission for camera-tracked steps.
    */
   const requestCameraPermission = useCallback(async () => {
@@ -129,7 +173,7 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
         PermissionsAndroid.PERMISSIONS.CAMERA,
         {
           title: 'Camera access',
-          message: 'NOVEN uses the camera to track your movement during this pose.',
+          message: 'NOVEN uses the camera to guide you while you do this activity.',
           buttonNeutral: 'Ask Me Later',
           buttonNegative: 'Cancel',
           buttonPositive: 'OK',
@@ -142,16 +186,24 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
   }, []);
 
   useEffect(() => {
+    if (!usesCamera) return;
     const timer = setTimeout(requestCameraPermission, 0);
     return () => clearTimeout(timer);
-  }, [requestCameraPermission]);
+  }, [usesCamera, requestCameraPermission]);
 
-/**
+  /**
    * Update camera engine when the camera-tracked step changes.
    * State updates are deferred to avoid synchronous setState in effect.
+   *
+   * Meditation deliberately gets NO engine. `SessionEngine` is a repetition
+   * machine, so running one for a posture that never repeats would create a rep
+   * tally describing a movement nobody made. Meditation's frames go to
+   * `MeditationPostureTracker` in `handlePoseFrame` instead. The camera preview
+   * still appears, because that is driven by `showCameraPreview`, not by the
+   * engine.
    */
   useEffect(() => {
-    if (isCameraStep && currentStepConfig) {
+    if (isCameraStep && currentStepConfig && !isMeditation) {
       cameraEngineRef.current = new SessionEngine(currentStepConfig);
       // Defer all state updates to avoid synchronous setState in effect
       setTimeout(() => {
@@ -164,20 +216,62 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
         setHasCameraEngine(false);
       }, 0);
     }
-  }, [isCameraStep, currentStepConfig]);
+  }, [isCameraStep, currentStepConfig, isMeditation]);
+
+  /**
+   * Starts each camera step from a clean slate.
+   *
+   * A posture carried over from the previous step would be a claim about a pose
+   * the person may already have moved out of, and a settling window carried over
+   * would skip the settling the new step is owed. Meditation only: the rep
+   * engine has a `reset()` of its own and is rebuilt per step above.
+   */
+  useEffect(() => {
+    postureTrackerRef.current.reset();
+    // Deferred for the same reason the engine effect above is: a synchronous
+    // setState here would cascade a render on every step change.
+    const timer = setTimeout(() => setPostureGuidance(null), 0);
+    return () => clearTimeout(timer);
+  }, [currentStepConfig, isMeditation]);
 
   /**
    * Handle pose frames from the camera for the current camera-tracked step.
+   *
+   * Two different consumers of the same frame, chosen by what the step is:
+   *
+   * - Yoga runs a `SessionEngine`, because a pose has repetitions to count and
+   *   the engine is what makes that counting honest.
+   * - Meditation runs `MeditationPostureTracker`, which measures one torso
+   *   angle and reports it. No reps, no range, no tally.
+   *
+   * Presence comes from the frame payload, so a person who has walked out of
+   * shot is reported as out of frame on the first frame after they go, rather
+   * than being carried along by whatever the last good posture was.
    */
   const handlePoseFrame = useCallback(
     (event: { nativeEvent: PoseFrameEventPayload }) => {
+      if (snapshot.phase !== 'running') return;
+      const { presence, landmarks, timestampMs } = event.nativeEvent;
+
+      if (isMeditation) {
+        setPostureGuidance(
+          postureTrackerRef.current.observe(
+            presence,
+            landmarks,
+            timestampMs,
+            // An unlabelled camera step is the less assertive one by default:
+            // confirmed in frame, with no claim made about posture.
+            snapshot.currentStep?.postureExpectation ?? 'in-frame',
+          ),
+        );
+        return;
+      }
+
       const engine = cameraEngineRef.current;
       if (!engine) return;
-      if (snapshot.phase !== 'running') return;
-      const result = engine.handlePoseFrame(event);
-      setCameraHud({ reps: result.reps, feedback: result.feedback });
+      setCameraHud(engine.handlePoseFrame(event));
     },
-    [snapshot.phase],
+    [snapshot.phase, snapshot.currentStep, isMeditation],
   );
 
   /**
@@ -338,8 +432,16 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
         </View>
       )}
 
-      {/* Camera preview for camera-tracked steps */}
-      {isCameraStep && running && hasCameraPermission && hasCameraEngine && (
+      {/*
+        Camera preview for camera-tracked steps.
+
+        Meditation mounts the preview as soon as permission is granted, with no
+        `hasCameraEngine` gate, because it has no rep engine by design — waiting
+        for one would mean the camera never appears for a meditation at all.
+        Yoga and Exercise still wait for theirs, so their HUD never renders
+        against an engine that is not there yet.
+      */}
+      {showCameraPreview && (
         <View style={styles.cameraFrame}>
           <PoseTrackerView
             style={styles.camera}
@@ -347,15 +449,32 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
             onPoseFrame={handlePoseFrame}
           />
           <View style={styles.cameraHudOverlay}>
-            {cameraHud.reps === 0 ? (
+            {isMeditation ? (
+              <View
+                style={[
+                  styles.posturePanel,
+                  { backgroundColor: posturePanelColor(theme, postureGuidance) },
+                ]}
+              >
+                {/*
+                  Before the first pose frame lands there is nothing to report,
+                  so the panel says so rather than inventing an assessment. It
+                  also deliberately shows no number: this is the one camera HUD
+                  in the app with no counter, because there is nothing here to
+                  count.
+                */}
+                <Text style={styles.posturePanelLabel}>POSTURE</Text>
+                <Text style={styles.posturePanelText}>
+                  {postureGuidance?.text ?? 'Camera starting up'}
+                </Text>
+              </View>
+            ) : cameraHud.reps === 0 ? (
               <View style={styles.cameraReadyPanel}>
                 <Text style={styles.cameraReadyTitle}>GET READY</Text>
                 <Text style={styles.cameraReadyLine}>
                   {currentStepConfig?.name ?? 'Pose'}
                 </Text>
-                <Text style={styles.cameraReadyHint}>
-                  {cameraHud.feedback.text}
-                </Text>
+                <Text style={styles.cameraReadyHint}>{cameraHud.feedback.text}</Text>
               </View>
             ) : (
               <View style={styles.cameraRunPanel}>
@@ -369,7 +488,7 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
       )}
 
       {isCameraStep && running && !hasCameraPermission && (
-        <CameraPlaceholder />
+        <CameraPlaceholder optional={isMeditation} />
       )}
 
       <StatusChip label={phaseLabel} tone={phaseTone} />
@@ -506,6 +625,34 @@ function minutesLabel(totalSeconds: number): string {
 
 function secondsLabel(totalSeconds: number): string {
   return (totalSeconds % 60).toString().padStart(2, '0');
+}
+
+/**
+ * Backdrop tint for the meditation posture panel.
+ *
+ * Reassurance is tinted with the brand's sage and everything else with the
+ * neutral ink, so a person who is sitting well sees a soft confirmation and
+ * someone who is being asked to adjust sees a plain, unalarming instruction.
+ * The distinction is deliberately only two states: an app that recolours its
+ * panel as a person breathes would be reporting on something it cannot see.
+ */
+/**
+ * The two palette entries this function reads.
+ *
+ * Typed structurally rather than off `Colors.light`, because `Colors` is
+ * `as const`: light and dark are distinct literal types, so a parameter naming
+ * either one would reject the other theme. Both declare these two keys as
+ * `string`, so this shape accepts whichever the screen is currently using.
+ */
+type PosturePanelColors = { accentSecondary: string; surfaceInverse: string };
+
+function posturePanelColor(
+  theme: PosturePanelColors,
+  guidance: MeditationGuidance | null,
+): string {
+  const settled = guidance?.upright === true || guidance?.state === 'settled';
+  const base = settled ? theme.accentSecondary : theme.surfaceInverse;
+  return `${base}D9`;
 }
 
 const styles = StyleSheet.create({
@@ -713,6 +860,26 @@ const styles = StyleSheet.create({
     fontSize: 28,
     lineHeight: 34,
     fontWeight: '700',
+    color: '#FAF9F6',
+    textAlign: 'center',
+  },
+  posturePanel: {
+    alignItems: 'center',
+    gap: Spacing.two,
+    margin: Spacing.four,
+    paddingVertical: Spacing.four,
+    paddingHorizontal: Spacing.five,
+    borderRadius: Radius.card,
+  },
+  posturePanelLabel: {
+    ...Type.label,
+    color: 'rgba(250, 249, 246, 0.72)',
+    textAlign: 'center',
+  },
+  posturePanelText: {
+    ...Type.bodyEmphasis,
+    fontSize: 22,
+    lineHeight: 30,
     color: '#FAF9F6',
     textAlign: 'center',
   },

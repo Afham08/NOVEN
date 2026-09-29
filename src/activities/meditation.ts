@@ -9,6 +9,14 @@ import { defineGuidedActivity, type GuidedActivity } from './types';
  * the person where their attention is supposed to be. That is enough for a
  * session to be worth starting and worth recording.
  *
+ * A few opening stages also carry `cameraConfigId`, which turns the camera on for
+ * that stage alone so the settling-in can be helped along. What the camera is
+ * allowed to say there is set by `postureExpectation` and nothing more: it can
+ * tell somebody they are not in frame, and on the stages that ask to be seated it
+ * can tell them their back is not upright. It says nothing about calm, focus,
+ * breathing, or whether they are meditating, because nothing in the frame
+ * supports any of those. See `meditation-guidance.ts`.
+ *
  * Every session is a multiple of a short first stage, so "one minute" really is
  * one minute and not a one-minute session with a long sit in the middle. The
  * longest is ten minutes, because the audience is older and a beginner's first
@@ -26,6 +34,8 @@ export const meditationSessions: readonly GuidedActivity[] = [
         seconds: 10,
         title: 'Settle',
         guidance: 'Sit comfortably. Let your hands rest, and let your shoulders drop.',
+        cameraConfigId: 'meditation-posture',
+        postureExpectation: 'seated-upright',
       },
       {
         seconds: 30,
@@ -53,6 +63,8 @@ export const meditationSessions: readonly GuidedActivity[] = [
         seconds: 20,
         title: 'Settle',
         guidance: 'Sit comfortably and close your eyes, or soften your gaze.',
+        cameraConfigId: 'meditation-posture',
+        postureExpectation: 'seated-upright',
       },
       {
         seconds: 20,
@@ -91,6 +103,11 @@ export const meditationSessions: readonly GuidedActivity[] = [
         seconds: 30,
         title: 'Settle',
         guidance: 'Lie down or sit back, whichever is more comfortable. Loosen anything tight.',
+        cameraConfigId: 'meditation-posture',
+        // This step invites the person to lie down, so the camera may confirm
+        // they are in frame and must not comment on how upright they are. See
+        // `MeditationPostureExpectation`.
+        postureExpectation: 'in-frame',
       },
       {
         seconds: 150,

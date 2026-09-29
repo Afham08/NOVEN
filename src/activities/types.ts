@@ -3,6 +3,8 @@
 // imports throughout.
 import type { SessionKind } from '../exercise/session-store';
 
+import type { MeditationPostureExpectation } from './meditation-guidance';
+
 /**
  * ============================================================================
  * The guided activities: Yoga, Meditation and Wellness.
@@ -46,6 +48,18 @@ export type GuidedStep = {
    * or can be manually advanced.
    */
   cameraConfigId?: string;
+  /**
+   * Only meaningful alongside `cameraConfigId`, and only for meditation.
+   *
+   * Says how much the step is willing to claim about the person's posture,
+   * because that is decided by the step's own guidance and not by the camera.
+   * A step that tells the person to sit can also be told to straighten up; a
+   * step that says "lie down or sit back" cannot, because a person lying down
+   * is upright nowhere and would be nagged for it. Defaults to `in-frame` when a
+   * camera step does not say, so an unlabelled step is never the more assertive
+   * of the two.
+   */
+  postureExpectation?: MeditationPostureExpectation;
 };
 
 /** A whole guided activity: something a person can start and finish. */

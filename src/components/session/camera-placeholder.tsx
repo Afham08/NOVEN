@@ -8,8 +8,15 @@ import { Radius, Spacing, Type } from '@/constants/theme';
  * denied, or on a platform with no native pose tracker. The session screen
  * swaps in the real CameraX + MediaPipe PoseTrackerView as soon as camera
  * permission is granted, so this is the no-camera fallback, not the session UI.
+ *
+ * `optional` changes the wording and nothing else. It exists for meditation,
+ * where the camera is a convenience for the opening posture rather than the
+ * thing the session is made of. The default wording tells the user camera
+ * access "is needed", which is true of a rep-counting exercise and false of a
+ * meditation that carries on regardless — so an optional camera must not imply
+ * the session is blocked.
  */
-export function CameraPlaceholder() {
+export function CameraPlaceholder({ optional = false }: { optional?: boolean }) {
   return (
     <View style={styles.frame}>
       <View style={styles.inner}>
@@ -20,8 +27,9 @@ export function CameraPlaceholder() {
         />
         <Text style={styles.title}>Camera unavailable</Text>
         <Text style={styles.subtitle}>
-          Camera access is needed to track your movement. Allow it in Settings, then reopen this
-          session.
+          {optional
+            ? 'You can carry on without the camera. Allow camera access in Settings if you would like a posture reminder.'
+            : 'Camera access is needed to track your movement. Allow it in Settings, then reopen this session.'}
         </Text>
       </View>
     </View>
