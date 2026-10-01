@@ -22,7 +22,7 @@ import { sessionStore } from '@/exercise/session-storage';
  */
 export default function ProgressScreen() {
   const router = useRouter();
-  const { summary, totalSessions } = useProgress(sessionStore);
+  const { summary, totalSessions, records } = useProgress(sessionStore);
 
   /**
    * Reopening a past session reuses the existing result screens exactly as they
@@ -80,16 +80,17 @@ export default function ProgressScreen() {
         hint={progressHint(summary, totalSessions)}
       />
 
-      <ProgressSection summary={summary} totalSessions={totalSessions} />
+      <ProgressSection summary={summary} totalSessions={totalSessions} records={records} />
 
       {/*
         The full list of real sessions, newest first, directly under the chart
         that summarises them, so any point on the line can be traced to the
-        session behind it.
+        session behind it. Twenty recent ones render before the offer of earlier
+        sessions — most histories fit, and none is cut off silently.
       */}
       {/* No subtitle: the list's own empty state already explains itself. */}
       <SectionHeader accent title="All your sessions" />
-      <SessionHistory store={sessionStore} onOpenSession={openSession} />
+      <SessionHistory store={sessionStore} onOpenSession={openSession} limit={20} />
     </Screen>
   );
 }

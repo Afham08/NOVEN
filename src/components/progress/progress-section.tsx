@@ -4,13 +4,21 @@ import { ProgressChart, axisLabelFor } from '@/components/progress/progress-char
 import { Card } from '@/components/ui/card';
 import { Radius, Spacing, Type } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { buildHistorySummary, describeHistorySummary } from '@/exercise/history-format';
 import type { ProgressSummary } from '@/exercise/progress';
+import type { SessionRecord } from '@/exercise/session-store';
 
 export type ProgressSectionProps = {
   /** Null while the first read is in flight. */
   summary: ProgressSummary | null;
   /** Every stored session, so "nothing yet" can be told apart from "nothing recent". */
   totalSessions: number | null;
+  /**
+   * The same stored sessions the summary was built from, for the plain-language
+   * recap of the whole history. It reuses the screen's one read rather than
+   * making a second one, so the recap can never disagree with the chart above.
+   */
+  records?: readonly SessionRecord[] | null;
 };
 
 /**
@@ -28,7 +36,7 @@ export type ProgressSectionProps = {
  * difference between someone who needs to start and someone who needs to keep
  * going. Nothing is ever drawn or averaged that the user did not do.
  */
-export function ProgressSection({ summary, totalSessions }: ProgressSectionProps) {
+export function ProgressSection({ summary, totalSessions, records = null }: ProgressSectionProps) {
   const theme = useTheme();
 
   // Still reading: render nothing rather than a "0" that is not a real score.
@@ -113,6 +121,47 @@ export function ProgressSection({ summary, totalSessions }: ProgressSectionProps
       <Text style={[styles.disclaimer, { color: theme.textSecondary }]}>
         Steady score, from your own sessions. Not a medical measurement.
       </Text>
+
+      <HistoryRecap records={records} />
+    </View>
+  );
+}
+
+/**
+ * The whole saved history as one plain sentence, under the 30-day view.
+ *
+ * The chart only ever sees the last 30 days, so a person whose sessions are
+ * older, or who mostly does guided routines, could read this screen and find no
+ * mention of what they have actually done. This block says it: which tracked
+ * movements were done and how often, across how many days — computed by pure
+ * read-side helpers from the same stored records the rest of the screen reads.
+ *
+ * It renders nothing while the read is in flight, and a quiet "not yet" when
+ * there is genuinely nothing saved, so the block never invents a beginning.
+ */
+function HistoryRecap({ records }: { records: readonly SessionRecord[] | null }) {
+  const theme = useTheme();
+
+  if (records === null) return null;
+
+  if (records.length === 0) {
+    return (
+      <View style={styles.recap}>
+        <Text style={[styles.recapTitle, { color: theme.heading }]}>What you have been doing</Text>
+        <Text style={[styles.recapBody, { color: theme.textSecondary }]}>
+          Nothing saved yet. Your sessions will be listed here as you finish them.
+        </Text>
+      </View>
+    );
+  }
+
+  const described = describeHistorySummary(buildHistorySummary(records));
+  if (described === null) return null;
+
+  return (
+    <View style={styles.recap}>
+      <Text style={[styles.recapTitle, { color: theme.heading }]}>What you have been doing</Text>
+      <Text style={[styles.recapBody, { color: theme.textSecondary }]}>{described}</Text>
     </View>
   );
 }
@@ -200,6 +249,20 @@ const styles = StyleSheet.create({
   },
   state: {
     gap: Spacing.two,
+  },
+  recap: {
+    gap: Spacing.two,
+    marginTop: Spacing.two,
+  },
+  recapTitle: {
+    ...Type.bodyEmphasis,
+    fontSize: 18,
+    lineHeight: 26,
+  },
+  recapBody: {
+    ...Type.body,
+    fontSize: 16,
+    lineHeight: 24,
   },
   stateTitle: {
     ...Type.bodyEmphasis,
