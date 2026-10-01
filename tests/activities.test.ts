@@ -18,6 +18,7 @@ import {
 import { GuidedSession, PROGRESS_MAX } from '../src/activities/guided-session';
 import { GUIDED_ACTIVITY_KINDS, totalStepSeconds, isGuidedActivityKind, type GuidedActivity } from '../src/activities/types';
 import { countDoneToday, todayStatus } from '../src/activities/today';
+import { getGuidedPoseConfig } from '../src/exercise/pose-configs';
 import { parseSecondsParam, parseStepCountParam, wholeNumberParam } from '../src/activities/result-params';
 import type { SessionRecord } from '../src/exercise/session-store';
 
@@ -445,6 +446,41 @@ export function run(): void {
       'a routine added later needs no screen edit to be described',
       describeRoutineMeta(later) === '2 min 30 sec · 2 poses',
       describeRoutineMeta(later),
+    );
+  });
+
+  suite('guided camera steps: every kind resolves its configs through the one registry', () => {
+    /*
+     * A guided step's `cameraConfigId` must resolve, or the camera silently
+     * never appears for that step. The meditation suite checks meditation's own
+     * steps; this one covers every kind, so a yoga step naming a config that
+     * only exists in the exercise registry (or nowhere) fails here loudly.
+     */
+    for (const kind of GUIDED_ACTIVITY_KINDS) {
+      for (const activity of guidedCatalog(kind)) {
+        for (const step of activity.steps) {
+          if (step.cameraConfigId === undefined) continue;
+          check(
+            `${kind}/${activity.id} step "${step.title}" resolves ${step.cameraConfigId}`,
+            getGuidedPoseConfig(step.cameraConfigId) !== undefined,
+          );
+        }
+      }
+    }
+
+    // The regression this suite exists for: Chair Yoga Flow's "Stand and Sit"
+    // step reuses the exercise registry's Sit-to-Stand thresholds.
+    check(
+      'chair-yoga-flow stand-and-sit resolves sit-to-stand',
+      getGuidedPoseConfig('sit-to-stand') !== undefined,
+    );
+    const flow = guidedCatalog('yoga').find((a) => a.id === 'chair-yoga-flow');
+    const standStep = flow?.steps.find((s) => s.cameraConfigId === 'sit-to-stand');
+    check('the stand-and-sit step is still in the routine', standStep !== undefined);
+    check(
+      'sit-to-stand resolves to the SAME config the exercise uses',
+      getGuidedPoseConfig('sit-to-stand')?.id === 'sit-to-stand' &&
+        getGuidedPoseConfig('sit-to-stand')?.thresholds.bentAngleDeg === 140,
     );
   });
 }

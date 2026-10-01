@@ -16,6 +16,7 @@ import {
 import type { GuidedActivity } from '@/activities/types';
 import { buildSessionMetrics } from '@/exercise/metrics';
 import { createSessionId, createSessionRecord } from '@/exercise/session-store';
+import { createExpoSpeechSink, VoiceFeedbackController } from '@/exercise/voice-feedback';
 import { sessionStore } from '@/exercise/session-storage';
 import { SessionEngine } from '@/exercise/session-engine';
 import { getGuidedPoseConfig } from '@/exercise/pose-configs';
@@ -88,6 +89,32 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
 
   const running = snapshot.phase === 'running';
 
+  /**
+   * Voice guidance is the SAME controller the exercise session uses — one speech
+   * pipeline for the whole app, injected with the same expo-speech sink, so there
+   * is no second TTS implementation and no second throttling policy to drift.
+   *
+   * The controller's own state machine keeps it calm: it speaks on genuine state
+   * changes only, never per frame, and silences itself while paused. The wording
+   * the guided session speaks is the step's own guidance text, handed over
+   * through `consider()`'s override parameter, so no new wording table and no
+   * new FeedbackKind values are invented here.
+   *
+   * Same lifecycle rules as the exercise session: created by the mount effect,
+   * reached through the ref from callbacks, disposed on unmount so a late timer
+   * tick can never speak into a screen that has navigated away.
+   */
+  const voiceRef = useRef<VoiceFeedbackController | null>(null);
+
+  useEffect(() => {
+    const voice = new VoiceFeedbackController(createExpoSpeechSink());
+    voiceRef.current = voice;
+    return () => {
+      voice.dispose();
+      if (voiceRef.current === voice) voiceRef.current = null;
+    };
+  }, []);
+
   /** Current step's camera config, if any. */
   const currentStepConfig = snapshot.currentStep?.cameraConfigId
     ? getGuidedPoseConfig(snapshot.currentStep.cameraConfigId)
@@ -138,16 +165,24 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
     session.reset();
     session.start();
     setSnapshot(session.snapshot());
+    // Same transition wording as the exercise session: one short sentence, then
+    // the controller's state machine decides everything else.
+    voiceRef.current?.reset();
+    voiceRef.current?.announceStart();
   }, [session]);
 
   const pause = useCallback(() => {
     session.pause();
     setSnapshot(session.snapshot());
+    // The controller suspends itself while paused; nothing further is spoken
+    // until Resume, exactly matching the exercise session's policy.
+    voiceRef.current?.announcePause();
   }, [session]);
 
   const resume = useCallback(() => {
     session.resume();
     setSnapshot(session.snapshot());
+    voiceRef.current?.announceResume();
   }, [session]);
 
   /**
@@ -269,7 +304,12 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
 
       const engine = cameraEngineRef.current;
       if (!engine) return;
-      setCameraHud(engine.handlePoseFrame(event));
+      const result = engine.handlePoseFrame(event);
+      setCameraHud(result);
+      // The voice layer reads the engine's own decision — the same object the
+      // HUD renders — so the speaker can never disagree with the screen. Its
+      // state machine speaks only on genuine changes, never per frame.
+      voiceRef.current?.onFrame(result);
     },
     [snapshot.phase, snapshot.currentStep, isMeditation],
   );
@@ -299,6 +339,14 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
       if (how === 'stopped') session.finishEarly();
       const final = session.snapshot();
       setSnapshot(final);
+
+      /*
+       * One calm closing line, spoken before navigating — the controller is
+       * terminal from here, so this is the last thing ever said for the session.
+       * The same completion wording the exercise session uses; no rep tally,
+       * because a guided session counted none.
+       */
+      voiceRef.current?.announceCompletion(0);
 
       const metrics = buildSessionMetrics({
         reps: 0,
@@ -377,6 +425,29 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
     void complete('finished');
   }, [snapshot.finished, complete]);
 
+  /*
+   * The step-by-step voice guide. When the session moves onto a new step, the
+   * step's own guidance sentence is spoken — one calm line telling the person
+   * what to do now, in the words already on the screen. A step the person has
+   * already passed is never re-announced, a pause re-renders the same step
+   * silently, and End speaks the completion line instead.
+   *
+   * Keyed on the step index rather than the step object so re-renders that do
+   * not change the step are free, and on `running` so nothing is spoken before
+   * Start or after the session has ended.
+   */
+  const announcedStepRef = useRef<number | null>(null);
+  useEffect(() => {
+    const step = snapshot.currentStep;
+    if (!running || step === null) return;
+    if (announcedStepRef.current === snapshot.stepIndex) return;
+    announcedStepRef.current = snapshot.stepIndex;
+    // `consider` with an override text is the one-shot announcement path: it is
+    // exempt from the state-change rules and always speaks. Calm by design —
+    // one sentence per step, never repeated while the step lasts.
+    voiceRef.current?.consider('ready', step.guidance);
+  }, [running, snapshot.currentStep, snapshot.stepIndex]);
+
   /**
    * Starting again after a finished session has to re-arm the once-only guard,
    * because that session has already been recorded and the new one is a
@@ -386,6 +457,7 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
     leavingRef.current = false;
     autoSavedRef.current = false;
     setSaving(false);
+    announcedStepRef.current = null;
     start();
   }, [start]);
   const phaseLabel =

@@ -501,6 +501,13 @@ const GUIDED_POSE_CONFIGS: Readonly<Record<string, ExerciseConfig>> = {
   [TRUNK_FORWARD_FLEXION.id]: TRUNK_FORWARD_FLEXION,
   [SEATED_HIP_FLEXION.id]: SEATED_HIP_FLEXION,
   [MEDITATION_POSTURE.id]: MEDITATION_POSTURE,
+  /*
+   * Chair Yoga Flow's "Stand and Sit" step names this config, so it must be
+   * resolvable here. It is the SAME object as the exercise entry above — not a
+   * copy — so the device-verified Sit-to-Stand thresholds are reused exactly,
+   * and tuning the exercise can never drift from the yoga step using it.
+   */
+  [SIT_TO_STAND.id]: SIT_TO_STAND,
 };
 
 /**
