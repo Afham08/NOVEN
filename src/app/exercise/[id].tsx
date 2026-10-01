@@ -7,6 +7,7 @@ import { Card } from '@/components/ui/card';
 import { Header } from '@/components/ui/header';
 import { SectionHeader } from '@/components/ui/section-header';
 import { Spacing, Type } from '@/constants/theme';
+import { describeDifficulty } from '@/data/exercise-format';
 import { formatDuration, getExerciseById } from '@/data/exercises';
 import { isPoseTracked } from '@/exercise/pose-configs';
 import { useTheme } from '@/hooks/use-theme';
@@ -39,7 +40,11 @@ export default function ExerciseDetailScreen() {
     <Screen>
       <Header title={exercise.name} />
       <Text style={[styles.meta, { color: theme.text }]}>
-        {exercise.target} · {formatDuration(exercise.durationSeconds)}
+        {exercise.target} · {describeDifficulty(exercise.difficulty)} ·{' '}
+        {formatDuration(exercise.durationSeconds)}
+      </Text>
+      <Text style={[styles.description, { color: theme.textSecondary }]}>
+        {exercise.description}
       </Text>
 
       <SectionHeader accent title="How to do it" />
@@ -87,6 +92,11 @@ const styles = StyleSheet.create({
     fontSize: 21,
     lineHeight: 28,
     fontWeight: '700',
+  },
+  description: {
+    ...Type.body,
+    fontSize: 19,
+    lineHeight: 28,
   },
   stepRow: {
     flexDirection: 'row',
