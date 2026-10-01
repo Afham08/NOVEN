@@ -11,6 +11,7 @@ import {
 } from '../src/activities/catalog';
 import {
   describeLength,
+  describeRoutineMeta,
   describeSessionOutcome,
   describeStepPosition,
 } from '../src/activities/activity-format';
@@ -388,5 +389,62 @@ export function run(): void {
     }
     check('a kind that does not exist is not accepted', !isGuidedActivityKind('swimming'));
     check('a non-string is not accepted', !isGuidedActivityKind(7));
+  });
+
+  // ==========================================================================
+  // The yoga library card
+  // ==========================================================================
+  suite('yoga library: every card is derived from its catalogue entry', () => {
+    /*
+     * The yoga list renders each routine's own summary and a meta line built by
+     * `describeRoutineMeta`. What is guarded here is that the wording a person
+     * sees is always a read of the catalogue, so a routine edited in one place
+     * cannot go on promising a length or a count it no longer has.
+     */
+    const yoga = guidedCatalog('yoga');
+
+    check('the yoga catalogue is not empty', yoga.length > 0);
+    for (const routine of yoga) {
+      check(`${routine.id} has a summary of its own`, typeof routine.summary === 'string' && routine.summary.length > 0);
+      check(
+        `${routine.id} meta line names the length and the pose count`,
+        describeRoutineMeta(routine) === `${describeLength(routine.durationSeconds)} · ${routine.steps.length} ${routine.progressNoun}`,
+        describeRoutineMeta(routine),
+      );
+      check(
+        `${routine.id} meta line spells out the length rather than printing seconds`,
+        describeRoutineMeta(routine).includes(describeLength(routine.durationSeconds)),
+        describeRoutineMeta(routine),
+      );
+      check(`${routine.id} uses the noun its kind really uses`, routine.progressNoun === 'poses');
+    }
+
+    const first = yoga[0];
+    check(
+      'a whole-minute routine never prints "0 sec"',
+      !/\b0 sec\b/.test(describeRoutineMeta(first)),
+      describeRoutineMeta(first),
+    );
+
+    /*
+     * A fourth routine added to the catalogue must appear on the library without
+     * the screen being edited: the meta line is derived, not typed per card.
+     */
+    const later: GuidedActivity = {
+      ...first,
+      id: 'test-future-routine',
+      name: 'A routine that does not exist yet',
+      summary: 'Added later, described the same way.',
+      durationSeconds: 150,
+      steps: [
+        { title: 'One', guidance: 'Move.', seconds: 75 },
+        { title: 'Two', guidance: 'Move back.', seconds: 75 },
+      ],
+    };
+    check(
+      'a routine added later needs no screen edit to be described',
+      describeRoutineMeta(later) === '2 min 30 sec · 2 poses',
+      describeRoutineMeta(later),
+    );
   });
 }
