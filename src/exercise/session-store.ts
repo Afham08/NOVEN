@@ -363,9 +363,30 @@ export type SessionStore = {
  * the whole history on every render, and a write refreshes that cache only once
  * the write has actually landed, so a failed write cannot make the in-memory
  * view disagree with the device.
+ *
+ * WHAT "COULD NOT READ" IS NOT
+ * `cache` is `null` for "not loaded yet" and an array for "loaded", so assigning
+ * `[]` to it after a failed read would be a claim the store cannot support: it
+ * would mean "the history was read, and it was empty", when in fact nothing was
+ * read at all. That claim is dangerous because a save is built by merging into
+ * the cached list, so a history believed to be empty would be written back over
+ * the key as a single new session and every stored session would be destroyed.
+ *
+ * So a failed read is not cached. `readFailed` records that the last attempt got
+ * no answer, which gives `read()` two jobs to stay honest about:
+ *
+ *   - it leaves `cache` at `null`, so the next read retries the storage instead of
+ *     reporting an empty history for the rest of the process, and
+ *   - it makes `write()` refuse, so an unread history is never overwritten.
+ *
+ * A caller still gets `[]` back from a read that failed, because a list it could
+ * not load must still render and the empty state is the honest answer for it.
+ * That is unchanged. What changes is that the store no longer mistakes "could not
+ * read" for "read it, and there was nothing there".
  */
 export function createSessionStore(store: KeyValueStore): SessionStore {
   let cache: SessionRecord[] | null = null;
+  let readFailed = false;
 
   async function read(): Promise<SessionRecord[]> {
     if (cache !== null) return cache;
@@ -376,14 +397,33 @@ export function createSessionStore(store: KeyValueStore): SessionStore {
       // A storage read that throws is treated as "nothing stored yet" rather
       // than propagated: the history list degrades to empty instead of the app
       // failing to render.
-      cache = [];
-      return cache;
+      //
+      // `cache` is deliberately left alone rather than set to `[]`. It stays
+      // `null` so the next call retries the storage instead of serving this empty
+      // list for the rest of the process, and `readFailed` records that nothing
+      // has actually been read yet so `write()` knows it must not overwrite it.
+      readFailed = true;
+      return [];
     }
     cache = parseSessionHistory(raw);
+    readFailed = false;
     return cache;
   }
 
   async function write(records: SessionRecord[]): Promise<void> {
+    // `records` is always "what was already stored, plus the new one", so if its
+    // starting point came from a read that failed it is not the stored history at
+    // all - it is an empty list, and writing it would delete every session
+    // currently on the device. Refusing is the only way to keep them. The caller
+    // already has to handle a save that does not land, and a session that went
+    // unrecorded costs far less than a history that cannot be recovered.
+    //
+    // This is unreachable from `deleteSession`: with no successful read its list
+    // is empty, so nothing matches and it reports false before writing. Deletion
+    // therefore keeps its existing behaviour either way.
+    if (readFailed) {
+      throw new Error('session history could not be read; refusing to overwrite it');
+    }
     const sorted = sortNewestFirst(records).slice(0, MAX_SAVED_SESSIONS);
     await store.setItem(SESSION_HISTORY_KEY, JSON.stringify(sorted));
     cache = sorted;

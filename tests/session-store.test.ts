@@ -32,17 +32,33 @@ declare function require(id: string): {
  *
  * `throwing` makes every operation reject, so the "storage is unavailable"
  * degradation path is testable too.
+ *
+ * `failReads` is separate from `throwing` because the two are different
+ * situations. `throwing` models storage that is simply not there: every call
+ * fails, so nothing is ever overwritten. `failReads` models reads that do not come
+ * back while writing still works — the only case in which a store that treats a
+ * failed read as "empty" can go on to destroy sessions that really are stored. It
+ * has to be expressible on its own to be tested.
  */
-function fakeStore(seed: Record<string, string> = {}, throwing = false): KeyValueStore & {
+function fakeStore(
+  seed: Record<string, string> = {},
+  throwing = false,
+  failReads = 0,
+): KeyValueStore & {
   data: Record<string, string>;
   writes: number;
+  reads: number;
 } {
   const data: Record<string, string> = { ...seed };
   const self = {
     data,
     writes: 0,
+    reads: 0,
     getItem(key: string): Promise<string | null> {
-      if (throwing) return Promise.reject(new Error('storage unavailable'));
+      self.reads += 1;
+      if (throwing || self.reads <= failReads) {
+        return Promise.reject(new Error('storage unavailable'));
+      }
       return Promise.resolve(key in data ? data[key] : null);
     },
     setItem(key: string, value: string): Promise<void> {
@@ -303,8 +319,10 @@ export function run(): void {
     const store = createSessionStore(fakeStore({}, true));
     check('a failing read yields no sessions', (await store.getSessions()).length === 0);
 
-    // A failing write must not leave the in-memory view claiming a session that
-    // was never stored.
+    // A save that cannot be stored must not leave the in-memory view claiming a
+    // session that was never written. In this store every operation fails, so the
+    // save is refused before anything reaches the key, and the guarantee the
+    // caller relies on holds either way: the promise rejects and nothing lands.
     let rejected = false;
     try {
       await store.saveSession(record('x', '2026-09-27T10:00:00.000Z'));
@@ -313,6 +331,98 @@ export function run(): void {
     }
     check('a failing write surfaces its error to the caller', rejected, rejected);
     check('and stores nothing', (await store.getSessions()).length === 0);
+  });
+
+  suite('session history: a failed read cannot let a later save destroy stored history', async () => {
+    // Pre-seeded rather than written through the store, so what was "already on
+    // the device" is unambiguous. `failReads` is 2 so that both the priming read
+    // and the read inside `saveSession` fail: that is the destructive case, where
+    // a store that treats a failed read as "empty" merges into nothing and writes
+    // a one-session history over the top of the real one.
+    const oldest = record('r1', '2026-09-25T08:00:00.000Z');
+    const middle = record('r2', '2026-09-26T08:00:00.000Z');
+    const newest = record('r3', '2026-09-27T08:00:00.000Z');
+    const seed = JSON.stringify([newest, middle, oldest]);
+    const backing = fakeStore({ [SESSION_HISTORY_KEY]: seed }, false, 2);
+    const store = createSessionStore(backing);
+
+    // The read that fails is still reported as an empty list, because a list that
+    // could not be loaded has to keep rendering.
+    check('the failed read reports no sessions', (await store.getSessions()).length === 0);
+
+    let rejected = false;
+    try {
+      await store.saveSession(record('new', '2026-09-28T08:00:00.000Z'));
+    } catch {
+      rejected = true;
+    }
+    check('saving after a failed read refuses rather than writing', rejected, rejected);
+
+    // The whole point: what was already stored is still there.
+    check(
+      'the stored history is byte-for-byte untouched',
+      backing.data[SESSION_HISTORY_KEY] === seed,
+      backing.data[SESSION_HISTORY_KEY],
+    );
+    check('nothing was written to the key', backing.writes === 0, backing.writes);
+
+    // Intact in memory would be worthless; it has to survive a restart, because a
+    // refused save is only recoverable if the next launch can still read it.
+    const afterRestart = createSessionStore(backing);
+    const all = await afterRestart.getSessions();
+    check('a fresh store still reads all three original sessions', all.length === 3, all.map((r) => r.id));
+    check('newest first, unchanged', all.map((r) => r.id).join(',') === 'r3,r2,r1', all.map((r) => r.id));
+  });
+
+  suite('session history: a failed read is retried instead of cached as empty', async () => {
+    // One store instance lives for the whole process, so caching a failed read as
+    // "empty" would report an empty history to every screen until the app was
+    // restarted - long after the storage recovered.
+    const kept = record('kept', '2026-09-27T08:00:00.000Z');
+    const backing = fakeStore({ [SESSION_HISTORY_KEY]: JSON.stringify([kept]) }, false, 1);
+    const store = createSessionStore(backing);
+
+    check('the first read fails and reports nothing', (await store.getSessions()).length === 0);
+    check('and it did reach the storage', backing.reads === 1, backing.reads);
+
+    const retried = await store.getSessions();
+    check('the next read retries and finds the stored session', retried.length === 1, retried.map((r) => r.id));
+    check('and it is the session that was really stored', retried[0]?.id === 'kept', retried[0]);
+    check('so the history was not hidden for the rest of the process', (await store.getSessions()).length === 1);
+    check('and the retry did not re-read once the cache was warm', backing.reads === 2, backing.reads);
+  });
+
+  suite('session history: saving works normally once a read has succeeded', async () => {
+    // The refusal must not stick. After one good read the store is back to
+    // normal, or a single storage hiccup would disable recording for the rest of
+    // the process.
+    const kept = record('kept', '2026-09-27T08:00:00.000Z');
+    const backing = fakeStore({ [SESSION_HISTORY_KEY]: JSON.stringify([kept]) }, false, 1);
+    const store = createSessionStore(backing);
+
+    await store.getSessions();
+    await store.getSessions();
+
+    await store.saveSession(record('added', '2026-09-28T08:00:00.000Z'));
+    const all = await store.getSessions();
+    check('the new session is stored alongside the older one', all.length === 2, all.map((r) => r.id));
+    check('newest first', all[0].id === 'added', all.map((r) => r.id));
+    check('the earlier session was merged in, not replaced', all[1].id === 'kept', all.map((r) => r.id));
+    check('and it reached the key', backing.writes === 1, backing.writes);
+  });
+
+  suite('session history: deleting after a failed read does not destroy anything', async () => {
+    // Deletion must stay non-destructive too. `failReads` is 2 so the delete's own
+    // read fails as well and it genuinely has no list to work from.
+    const kept = record('kept', '2026-09-27T08:00:00.000Z');
+    const seed = JSON.stringify([kept]);
+    const backing = fakeStore({ [SESSION_HISTORY_KEY]: seed }, false, 2);
+    const store = createSessionStore(backing);
+
+    await store.getSessions();
+    check('deleting reports that nothing matched', (await store.deleteSession('kept')) === false);
+    check('the stored history is still intact', backing.data[SESSION_HISTORY_KEY] === seed, backing.data[SESSION_HISTORY_KEY]);
+    check('and nothing was written', backing.writes === 0, backing.writes);
   });
 
   suite('session history: sessions survive a restart of the app', async () => {
