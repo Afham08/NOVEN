@@ -3,6 +3,7 @@ import { awaitAllSuites, report } from './harness';
 import { run as runActivities } from './activities.test';
 import { run as runActivityFlow } from './activity-flow.test';
 import { run as runButtonAppearance } from './button-appearance.test';
+import { run as runCoachingFeedback } from './coaching-feedback.test';
 import { run as runExerciseLibrary } from './exercise-library.test';
 import { run as runHistoryFormat } from './history-format.test';
 import { run as runMetrics } from './metrics.test';
@@ -25,6 +26,7 @@ async function main(): Promise<void> {
   runActivities();
   runActivityFlow();
   runButtonAppearance();
+  runCoachingFeedback();
   runExerciseLibrary();
   runHistoryFormat();
   runMetrics();

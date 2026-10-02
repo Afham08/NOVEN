@@ -232,7 +232,7 @@ export class SessionEngine {
     // cannot fabricate a count or an impossible pace.
     const repPhase = priorityPhase(left.currentPhase, right.currentPhase);
     const celebrating = this.latch.observe(repPhase, repCompletedThisFrame);
-    return this.emit(phaseFeedback(repPhase, celebrating), repCompletedThisFrame);
+    return this.emit(phaseFeedback(repPhase, celebrating, this.config.id), repCompletedThisFrame);
   }
 
   /**

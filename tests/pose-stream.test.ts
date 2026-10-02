@@ -3,6 +3,7 @@ import { check, suite } from './harness';
 
 import { SEATED_KNEE_EXTENSION } from '../src/exercise/configs';
 import { phaseFeedback, PositiveFeedbackLatch, priorityPhase, readinessFeedback } from '../src/exercise/feedback';
+import { SIT_TO_STAND } from '../src/exercise/pose-configs';
 import { SessionEngine } from '../src/exercise/session-engine';
 import type { Side } from '../src/exercise/types';
 
@@ -352,15 +353,68 @@ export function run(): void {
     check('same phase yields the same tone', a.tone === b.tone);
 
     check('rest reads as ready', phaseFeedback('rest', false).text === 'Ready');
-    check('extending instructs', phaseFeedback('extending', false).text === 'Extend your knee');
-    check('extended confirms', phaseFeedback('extended', false).text === 'Keep it straight');
-    check('returning instructs', phaseFeedback('returning', false).text === 'Return slowly');
+    // The knee wording is tied to the movement it describes, not to the phase.
+    check(
+      'extending instructs, for the knee movement',
+      phaseFeedback('extending', false, 'seated-knee-extension').text === 'Extend your knee',
+    );
+    check(
+      'extended confirms, for the knee movement',
+      phaseFeedback('extended', false, 'seated-knee-extension').text === 'Keep it straight',
+    );
+    check(
+      'returning instructs, for the knee movement',
+      phaseFeedback('returning', false, 'seated-knee-extension').text === 'Return slowly',
+    );
     check('completion praises', phaseFeedback('rest', true).text === 'Good movement');
     check('praise tone is positive', phaseFeedback('rest', true).tone === 'sage');
 
     check('waiting asks for position', readinessFeedback('waiting').text === 'Get into position');
     check('stabilizing asks for stillness', readinessFeedback('stabilizing').text === 'Get ready');
     check('ready confirms', readinessFeedback('ready').text === 'Ready');
+  });
+
+  /**
+   * Drives one full out-and-back cycle and records what the HUD was told.
+   * Returns the distinct texts in the order they first appeared.
+   */
+  function coachingFor(config: typeof SEATED_KNEE_EXTENSION): string[] {
+    const engine = new SessionEngine(config);
+    let t = reachReady(engine);
+    const seen: string[] = [];
+    for (const angle of [120, 140, 160, 176, 176, 160, 140, 120, REST, REST]) {
+      const out = engine.handlePoseFrame(frame(pose(angle, angle), t));
+      if (!seen.includes(out.feedback.text)) seen.push(out.feedback.text);
+      t += 100;
+    }
+    return seen;
+  }
+
+  suite('feedback: the engine words the cue for the movement it was built with', () => {
+    /*
+     * The wording lookup is only worth anything if the movement actually reaches
+     * it. Two engines are driven with byte-identical synthetic frames and differ
+     * only in their config, which is exactly the substitution the guided screen
+     * makes when it resolves a step's cameraConfigId.
+     */
+    const knee = coachingFor(SEATED_KNEE_EXTENSION);
+    const stand = coachingFor(SIT_TO_STAND);
+
+    check('the knee engine coaches the knee', knee.includes('Extend your knee'), knee);
+    check('the knee engine says to keep it straight', knee.includes('Keep it straight'), knee);
+
+    for (const phrase of ['Extend your knee', 'Keep it straight', 'Return slowly']) {
+      check(`a sit-to-stand session never says "${phrase}"`, !stand.includes(phrase), stand);
+    }
+    check('the sit-to-stand engine coaches standing up', stand.includes('Stand up slowly'), stand);
+
+    // Movement wording changed; rep counting and praise did not.
+    check('the knee session still finishes on a counted rep', knee.includes('Good movement'), knee);
+    check('the sit-to-stand session still finishes on a counted rep', stand.includes('Good movement'), stand);
+
+    for (const text of [...knee, ...stand]) {
+      check(`"${text}" is a short phrase`, text.length > 0 && text.length <= 24, text);
+    }
   });
 
   suite('feedback: merged leg phase prefers the active instruction', () => {
