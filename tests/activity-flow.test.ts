@@ -173,6 +173,76 @@ export function run(): void {
     );
   });
 
+  suite('meditation camera stage: frames go to the posture tracker, never the rep engine', () => {
+    /*
+     * Meditation's camera stage has no repetition to count, so the shared
+     * screen recognises the kind, gives those frames to
+     * MeditationPostureTracker, and never builds a SessionEngine for it. Each
+     * line below guards a property whose absence would silently disable or
+     * corrupt the meditation camera while every registry test stayed green:
+     * the preview must not wait for an engine meditation never creates, the
+     * meditation branch must run before the engine and voice-on-frame paths,
+     * and the tracker's own sentence must be what the HUD shows.
+     */
+    const code = stripComments(readComponent('guided', 'guided-activity-screen.tsx'));
+
+    check(
+      'the screen recognises a meditation by its kind',
+      code.includes("const isMeditation = activity.kind === 'meditation'"),
+    );
+    check(
+      'the preview does not wait for an engine meditation never builds',
+      code.includes('isMeditation || hasCameraEngine'),
+    );
+    check(
+      'no session engine is built for a meditation camera step',
+      code.includes('isCameraStep && currentStepConfig && !isMeditation'),
+    );
+    const meditationBranch = code.indexOf('if (isMeditation)');
+    check(
+      'meditation frames branch before the engine path',
+      meditationBranch !== -1 && meditationBranch < code.indexOf('engine.handlePoseFrame(event)'),
+      meditationBranch,
+    );
+    check(
+      'frames are handed to the posture tracker with the step own expectation',
+      code.includes('postureTrackerRef.current.observe(') &&
+        code.includes("snapshot.currentStep?.postureExpectation ?? 'in-frame'"),
+    );
+    check(
+      'the tracker result is what the posture HUD shows',
+      code.includes('setPostureGuidance(') &&
+        code.includes("postureGuidance?.text ?? 'Camera starting up'"),
+    );
+    check(
+      'meditation frames return before the voice-on-frame path',
+      meditationBranch !== -1 && meditationBranch < code.indexOf('voiceRef.current?.onFrame(result)'),
+      meditationBranch,
+    );
+    check(
+      'each stage speaks its own guidance once, guarded by step index',
+      code.includes("voiceRef.current?.consider('ready', step.guidance)") &&
+        code.includes('announcedStepRef.current === snapshot.stepIndex'),
+    );
+    check(
+      'nothing is spoken before Start or after the session ends',
+      code.includes('if (!running || step === null) return;'),
+    );
+    check(
+      'pause and resume are announced once each, as transitions',
+      code.includes('voiceRef.current?.announcePause();') &&
+        code.includes('voiceRef.current?.announceResume();'),
+    );
+    check(
+      'camera permission is only requested for activities that use it',
+      code.includes('if (!usesCamera) return;'),
+    );
+    check(
+      'a denied camera leaves an optional placeholder on meditation',
+      code.includes('<CameraPlaceholder optional={isMeditation} />'),
+    );
+  });
+
   // ==========================================================================
   // Task 6: one progress system, and no invented numbers
   // ==========================================================================

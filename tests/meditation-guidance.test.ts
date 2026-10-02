@@ -8,6 +8,7 @@ import {
   torsoLeanFromVerticalDeg,
 } from '../src/activities/meditation-guidance';
 import { meditationSessions } from '../src/activities/meditation';
+import { GuidedSession } from '../src/activities/guided-session';
 import { getGuidedPoseConfig } from '../src/exercise/pose-configs';
 
 /**
@@ -394,6 +395,74 @@ export function run(): void {
         cameraSteps < activity.steps.length,
       );
     }
+  });
+
+  suite('the default meditation routine runs its opening camera stage on the clock', () => {
+    /*
+     * The suites above prove the posture maths and the catalogue's declarations.
+     * This one drives the REAL routines the way the screen does: the opening
+     * "Settle" stage must be the camera stage, its config must resolve while
+     * that stage is the one under way, and the session must walk past the camera
+     * stage on time alone — a camera that never settles, or a permission that
+     * never arrives, cannot hold the meditation at step one.
+     */
+    check(
+      'the default routine is the first one in the catalogue',
+      meditationSessions[0]?.id === 'one-minute-calm',
+      meditationSessions[0]?.id,
+    );
+
+    for (const activity of meditationSessions) {
+      check(
+        `${activity.id} opens on its camera stage`,
+        activity.steps[0]?.cameraConfigId === 'meditation-posture',
+        activity.steps[0]?.cameraConfigId,
+      );
+    }
+
+    const activity = meditationSessions[0];
+    let nowMs = 1_000_000;
+    const session = new GuidedSession(activity, () => nowMs);
+    session.start();
+
+    nowMs += 1_000; // One second into the opening stage.
+    const opening = session.snapshot();
+    check('the opening stage is under way', opening.stepIndex === 0, opening.stepIndex);
+    const resolved = getGuidedPoseConfig(opening.currentStep?.cameraConfigId);
+    check(
+      'the stage under way resolves its camera config at runtime',
+      resolved !== undefined,
+      opening.currentStep?.cameraConfigId,
+    );
+    check('it is the meditation posture config', resolved?.id === 'meditation-posture', resolved?.id);
+    check(
+      'the seated opening asks only for an upright seat',
+      opening.currentStep?.postureExpectation === 'seated-upright',
+      opening.currentStep?.postureExpectation,
+    );
+
+    nowMs += 10_000; // Past the 10s Settle stage.
+    const afterCamera = session.snapshot();
+    check(
+      'the session moves past the camera stage on the clock alone',
+      afterCamera.stepIndex === 1,
+      afterCamera.stepIndex,
+    );
+    check('the camera stage counts as completed', afterCamera.stepsCompleted === 1, afterCamera.stepsCompleted);
+    check(
+      'the stage after the camera is not a camera stage',
+      afterCamera.currentStep?.cameraConfigId === undefined,
+      afterCamera.currentStep?.cameraConfigId,
+    );
+
+    nowMs += activity.durationSeconds * 1000;
+    const done = session.snapshot();
+    check('the routine completes without the camera gating it', done.phase === 'finished', done.phase);
+    check(
+      'every stage is accounted for at the end',
+      done.stepsCompleted === activity.steps.length,
+      done.stepsCompleted,
+    );
   });
 }
 
