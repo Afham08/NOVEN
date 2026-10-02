@@ -367,10 +367,15 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
       /*
        * One calm closing line, spoken before navigating — the controller is
        * terminal from here, so this is the last thing ever said for the session.
-       * The same completion wording the exercise session uses; no rep tally,
-       * because a guided session counted none.
+       * The same completion wording the exercise session uses.
+       *
+       * The count handed over is the SAME measured tally the record is built
+       * from below, so the number spoken can never disagree with the number
+       * stored. Both read the tally once the session is final, and there is no
+       * await between them, so they read the same value. A routine that measured
+       * nothing still passes a true 0.
        */
-      voiceRef.current?.announceCompletion(0);
+      voiceRef.current?.announceCompletion(measuredReps(repTallyRef.current));
 
       /*
        * The repetitions are the ones the camera steps' engines actually counted,

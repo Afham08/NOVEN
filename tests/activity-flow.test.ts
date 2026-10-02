@@ -579,5 +579,32 @@ export function run(): void {
     check('it does not save a hardcoded zero any more', !/buildSessionMetrics\(\{\s*reps: 0/.test(screen), screen);
     check('starting again clears the previous session total', /repTallyRef\.current = emptyRepTally\(\)/.test(screen), screen);
     check('the unmeasured fields stay unmeasured', /rangeMinDeg: null/.test(screen) && /rangeMaxDeg: null/.test(screen) && /repRanges: \[\]/.test(screen), screen);
+
+    /*
+     * The spoken completion is the same bug one layer out: the tally existed but
+     * `announceCompletion(0)` was hardcoded, so a session that counted reps said
+     * nothing about them while the history recorded the count. Nothing here can
+     * render the screen, so the argument the screen passes is pinned directly.
+     */
+    check(
+      'the closing line announces the same measured tally',
+      /announceCompletion\(measuredReps\(repTallyRef\.current\)\)/.test(screen),
+      screen,
+    );
+    check('it no longer announces a hardcoded zero', !/announceCompletion\(0\)/.test(screen), screen);
+
+    const announceAt = screen.indexOf('announceCompletion(');
+    const metricsAt = screen.indexOf('buildSessionMetrics({');
+    check(
+      'the tally is final before the number is announced',
+      screen.indexOf('leavingRef.current = true') > -1 &&
+        screen.indexOf('leavingRef.current = true') < announceAt,
+      screen,
+    );
+    check(
+      'the announced count and the saved count cannot drift apart',
+      announceAt > -1 && metricsAt > announceAt && !/\bawait\b/.test(screen.slice(announceAt, metricsAt)),
+      screen.slice(announceAt, metricsAt),
+    );
   });
 }

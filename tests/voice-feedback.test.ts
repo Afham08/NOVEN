@@ -5,6 +5,8 @@ import { pausedFeedback, phaseFeedback, presenceFeedback, readinessFeedback, set
 import { SessionEngine } from '../src/exercise/session-engine';
 import { repCountToWords, VoiceFeedbackController, type SpeechPriority, type SpeechSink } from '../src/exercise/voice-feedback';
 
+import { beginStep, emptyRepTally, measuredReps, observeStepReps, type GuidedRepTally } from '../src/activities/guided-reps';
+
 import type { LandmarkEventPayload, PoseFrameEventPayload, PoseLandmarkName, PosePresence } from '../modules/pose-tracker';
 import type { Side } from '../src/exercise/types';
 
@@ -902,14 +904,84 @@ export function run(): void {
     check('resume is announced', paused.some((s) => s.text === 'Resume.'), paused);
 
     // Completion is terminal — the same invariant the exercise session relies on.
+    // The guided screen hands the controller the reps its camera steps measured,
+    // so the tally is spoken here exactly as it is for an exercise session.
     const { spoken: done, voice: doneVoice } = rig();
     doneVoice.announceStart();
     doneVoice.consider('ready', steps[0]);
-    doneVoice.announceCompletion(0);
+    doneVoice.announceCompletion(2);
     doneVoice.consider('ready', steps[1]);
-    check('nothing is spoken after completion', done.every((s) => s.text === 'Start.' || s.text === steps[0] || s.text === 'Session complete.'), done);
+    const allowedOnDone = ['Start.', steps[0], 'Session complete.', 'You completed two reps.'];
+    check('nothing is spoken after completion', done.every((s) => allowedOnDone.includes(s.text)), done);
     check('completion speaks the closing line', done.some((s) => s.text === 'Session complete.'), done);
-    check('no rep tally is spoken for a guided session', !done.some((s) => s.text.includes('rep')), done);
+    check('completion speaks the reps that were measured', done.some((s) => s.text === 'You completed two reps.'), done);
+
+    // A routine whose camera steps measured nothing still passes a true 0, and the
+    // controller's existing rule for 0 is unchanged: the closing line, no tally.
+    const { spoken: none, voice: noneVoice } = rig();
+    noneVoice.announceStart();
+    noneVoice.announceCompletion(0);
+    check('a genuine zero still speaks only the closing line', none.map((s) => s.text).join(' ') === 'Start. Session complete.', none);
+    check('no rep tally is invented for a session that measured none', !none.some((s) => s.text.includes('rep')), none);
+  });
+
+  suite('voice: a guided session announces the reps it actually measured', () => {
+    /*
+     * The guided screen cannot be rendered by this harness, so this suite proves
+     * the half that CAN run: the measured total, read out of a real tally, handed
+     * to the real controller. The other half — that the screen passes this value
+     * rather than a literal — is pinned by the source-shape guard in
+     * activity-flow.test.ts. Between them the spoken number is the stored number,
+     * because it is the same number.
+     *
+     * The tally is folded here exactly the way the screen folds it: one reading
+     * per camera frame, the engine reporting a running per-step total.
+     */
+    const foldFrame = (tally: GuidedRepTally, reading: number) => observeStepReps(tally, reading);
+
+    for (const measured of [1, 2, 3, 8, 12]) {
+      // A single camera step that ended on a reading of `measured`.
+      const tally = foldFrame(emptyRepTally(), measured);
+      check(`${measured} measured reps reach the tally as ${measured}`, measuredReps(tally) === measured, measuredReps(tally));
+
+      const { spoken, voice } = rig();
+      voice.announceStart();
+      voice.announceCompletion(measuredReps(tally));
+      check(
+        `${measured} measured reps are announced as ${measured}`,
+        spoken.some((s) => s.text === `You completed ${repCountToWords(measured)} reps.`),
+        spoken,
+      );
+    }
+
+    // Two camera steps, each counted from zero by its own engine: 2 then 3.
+    let twoSteps = emptyRepTally();
+    twoSteps = beginStep(twoSteps);
+    for (const reading of [1, 2]) twoSteps = foldFrame(twoSteps, reading);
+    twoSteps = beginStep(twoSteps);
+    for (const reading of [3]) twoSteps = foldFrame(twoSteps, reading);
+    check('two camera steps sum to one announced total', measuredReps(twoSteps) === 5, measuredReps(twoSteps));
+    const { spoken: summed, voice: summedVoice } = rig();
+    summedVoice.announceCompletion(measuredReps(twoSteps));
+    check('the summed total is what gets spoken', summed.some((s) => s.text === 'You completed five reps.'), summed);
+
+    /*
+     * Why the literal 0 was wrong: it is not merely a different number, it
+     * suppresses the tally line entirely, so a session that counted reps said
+     * nothing about them while the history recorded the count.
+     */
+    const { spoken: literal, voice: literalVoice } = rig();
+    literalVoice.announceCompletion(0);
+    check('a hardcoded 0 speaks no tally at all', !literal.some((s) => s.text.includes('rep')), literal);
+    check('while the measured count does speak one', summed.some((s) => s.text.includes('rep')), summed);
+
+    // The exercise session passes its own engine count straight through: same
+    // controller, same wording, same gating, untouched by any of this.
+    const { spoken: exercise, voice: exerciseVoice } = rig();
+    exerciseVoice.announceStart();
+    exerciseVoice.announceCompletion(8);
+    check('an exercise session still announces its own count', exercise.some((s) => s.text === 'You completed eight reps.'), exercise);
+    check('and still starts with the closing line before the tally', exercise.map((s) => s.text).join(' ') === 'Start. Session complete. You completed eight reps.', exercise);
   });
 }
 
