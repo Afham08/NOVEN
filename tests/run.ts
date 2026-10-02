@@ -7,6 +7,7 @@ import { run as runHistoryFormat } from './history-format.test';
 import { run as runMetrics } from './metrics.test';
 import { run as runMeditationGuidance } from './meditation-guidance.test';
 import { run as runPoseStream } from './pose-stream.test';
+import { run as runPoseTrackerModule } from './pose-tracker-module.test';
 import { run as runPoseUtils } from './pose-utils.test';
 import { run as runProgress } from './progress.test';
 import { run as runProgressChart } from './progress-chart.test';
@@ -32,6 +33,7 @@ async function main(): Promise<void> {
   runReadinessGate();
   runResultRouting();
   runPoseStream();
+  runPoseTrackerModule();
   runVoiceFeedback();
   runSessionStore();
   runProgress();
