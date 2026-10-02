@@ -454,9 +454,34 @@ export function createSessionStore(store: KeyValueStore): SessionStore {
       return true;
     },
 
+    /*
+     * WHY `readFailed` IS RESET HERE
+     * -------------------------------
+     * `readFailed` means "the stored history is unknown, so a write could destroy
+     * it". A successful `removeItem` retires exactly that condition: the key no
+     * longer exists, so there is no unread history left for a write to overwrite.
+     * The refusal is therefore no longer protecting anything, and the store is
+     * back in the same state a successful read would have left it in.
+     *
+     * WHY IT USED TO STICK — the permanently-unrecordable store
+     * ---------------------------------------------------------
+     * The flag was left set, and because `cache` is `[]` rather than `null` here,
+     * every later `read()` takes the cache-first early return and so never
+     * reaches the line that clears `readFailed` on a good read. The store was
+     * therefore stuck for the rest of the process: every `saveSession` rejected
+     * with "session history could not be read; refusing to overwrite it" even
+     * though the user had just deleted that history themselves.
+     *
+     * Reaching it needs a read to have failed first (a transient storage error),
+     * which is exactly the situation a user is most likely to clear their history
+     * in. The exercise session screen absorbs a save rejection, so the next
+     * session the user finished showed a result screen and then silently left no
+     * trace in their history, with nothing to tell them why.
+     */
     async clearSessions() {
       await store.removeItem(SESSION_HISTORY_KEY);
       cache = [];
+      readFailed = false;
     },
   };
 }

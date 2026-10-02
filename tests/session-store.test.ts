@@ -425,6 +425,58 @@ export function run(): void {
     check('and nothing was written', backing.writes === 0, backing.writes);
   });
 
+  suite('session history: clearing after a failed read leaves recording working', async () => {
+    // Clearing is the one operation that PROVES what is stored: the key is
+    // removed outright, so there is no unread history left that a write could
+    // destroy, and the refusal that protects an unreadable history has nothing
+    // left to protect.
+    //
+    // This is reachable, not theoretical. It needs a read to have failed first —
+    // a transient storage error, which is the very situation a user is most
+    // likely to clear their history in. Settings -> Privacy deletes for real.
+    const kept = record('kept', '2026-09-27T08:00:00.000Z');
+    const seed = JSON.stringify([kept]);
+    const backing = fakeStore({ [SESSION_HISTORY_KEY]: seed }, false, 1);
+    const store = createSessionStore(backing);
+
+    check('the first read fails and reports nothing', (await store.getSessions()).length === 0);
+
+    await store.clearSessions();
+    check('clearing removed the stored history', backing.data[SESSION_HISTORY_KEY] === undefined);
+
+    // Before the fix this rejected with "session history could not be read;
+    // refusing to overwrite it", and kept rejecting for the rest of the process.
+    let rejected: string | null = null;
+    try {
+      await store.saveSession(record('after-clear', '2026-09-28T08:00:00.000Z'));
+    } catch (error) {
+      rejected = error instanceof Error ? error.message : String(error);
+    }
+    check('a session finished after clearing is recorded', rejected === null, rejected);
+    check('it reached the key', backing.writes === 1, backing.writes);
+
+    const all = await store.getSessions();
+    check('and it comes back', all.length === 1, all.map((r) => r.id));
+    check('as the only session', all[0]?.id === 'after-clear', all.map((r) => r.id));
+
+    // Not merely in memory: a cleared-then-used store has to survive a restart,
+    // because a session recorded into a cache that never reached storage would
+    // look saved and then vanish.
+    const afterRestart = createSessionStore(backing);
+    const persisted = await afterRestart.getSessions();
+    check('it survives a restart', persisted.length === 1, persisted.map((r) => r.id));
+    check('with the same id', persisted[0]?.id === 'after-clear', persisted.map((r) => r.id));
+
+    // And clearing resets the flag because the key is gone, NOT because a read
+    // ever succeeded: the refusal that protects a genuinely unreadable history is
+    // untouched.
+    const guardedBacking = fakeStore({ [SESSION_HISTORY_KEY]: seed }, false, 2);
+    const guarded = createSessionStore(guardedBacking);
+    check('an unread history still reports nothing', (await guarded.getSessions()).length === 0);
+    check('and its bytes are still on the device', guardedBacking.data[SESSION_HISTORY_KEY] === seed);
+    check('nothing was written over them', guardedBacking.writes === 0, guardedBacking.writes);
+  });
+
   suite('session history: sessions survive a restart of the app', async () => {
     // The defining property of persistence: a brand new store instance over the
     // same storage — which is exactly what an app launch produces — still sees
