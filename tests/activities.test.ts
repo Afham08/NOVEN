@@ -18,7 +18,7 @@ import {
 import { GuidedSession, PROGRESS_MAX } from '../src/activities/guided-session';
 import { GUIDED_ACTIVITY_KINDS, totalStepSeconds, isGuidedActivityKind, type GuidedActivity } from '../src/activities/types';
 import { countDoneToday, todayStatus } from '../src/activities/today';
-import { getGuidedPoseConfig } from '../src/exercise/pose-configs';
+import { getExerciseConfig, getGuidedPoseConfig } from '../src/exercise/pose-configs';
 import { parseSecondsParam, parseStepCountParam, wholeNumberParam } from '../src/activities/result-params';
 import type { SessionRecord } from '../src/exercise/session-store';
 
@@ -482,5 +482,60 @@ export function run(): void {
       getGuidedPoseConfig('sit-to-stand')?.id === 'sit-to-stand' &&
         getGuidedPoseConfig('sit-to-stand')?.thresholds.bentAngleDeg === 140,
     );
+  });
+
+  suite('chair yoga: the stand-and-sit step runs in place in the real routine', () => {
+    /*
+     * The suite above resolves the config statically against the catalogue.
+     * This one drives the REAL Chair Yoga Flow clock to its "Stand and Sit"
+     * step and resolves the config from the step the session actually lands
+     * on — the same expression the screen runs while the session is live —
+     * then walks the routine to its end. A dangling id, a reordered routine,
+     * or a step that skips its neighbours fails here at runtime rather than by
+     * inspection of the catalogue alone.
+     */
+    const activity = guidedCatalog('yoga').find((a) => a.id === 'chair-yoga-flow');
+    check('chair yoga flow is in the catalogue', activity !== undefined, activity?.id);
+    if (activity === undefined) return;
+
+    const standIndex = activity.steps.findIndex((s) => s.cameraConfigId === 'sit-to-stand');
+    check('the routine still has a stand-and-sit camera step', standIndex > 0, standIndex);
+    if (standIndex <= 0) return;
+
+    const startOfStandSeconds = activity.steps
+      .slice(0, standIndex)
+      .reduce((total, step) => total + step.seconds, 0);
+    const clock = fakeClock();
+    const session = new GuidedSession(activity, clock.now);
+    session.start();
+    // One second into the step, so it is unambiguously the step under way.
+    clock.advance(startOfStandSeconds + 1);
+
+    const onStand = session.snapshot();
+    check('the session lands on the stand-and-sit step', onStand.stepIndex === standIndex, onStand.stepIndex);
+    check('every step before it is completed', onStand.stepsCompleted === standIndex, onStand.stepsCompleted);
+    check('no later step is claimed early', onStand.stepsCompleted < activity.steps.length, onStand.stepsCompleted);
+
+    // The exact lookup the screen performs on the step it is currently running.
+    const resolved = getGuidedPoseConfig(onStand.currentStep?.cameraConfigId);
+    check(
+      'the step under way resolves its camera config at runtime',
+      resolved !== undefined,
+      onStand.currentStep?.cameraConfigId,
+    );
+    check('it is the sit-to-stand config', resolved?.id === 'sit-to-stand', resolved?.id);
+    check(
+      'it is the SAME object the exercise session uses, not a copy',
+      resolved !== undefined && resolved === getExerciseConfig('sit-to-stand'),
+    );
+
+    clock.advance(activity.durationSeconds);
+    const done = session.snapshot();
+    check(
+      'the remaining steps still run after it, none bypassed',
+      done.stepsCompleted === activity.steps.length,
+      done.stepsCompleted,
+    );
+    check('the routine finishes normally', done.phase === 'finished', done.phase);
   });
 }

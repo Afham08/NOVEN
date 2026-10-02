@@ -131,6 +131,48 @@ export function run(): void {
     check('the pause and end controls are large targets', /minHeight: 60/.test(fs.readFileSync(fromComponents('ui', 'button.tsx'), 'utf8')));
   });
 
+  suite('camera steps: the shared screen drives the existing pose pipeline', () => {
+    /*
+     * The registry suites prove a step's cameraConfigId RESOLVES. None of them
+     * can see the screen that consumes it. If the shared screen stopped
+     * resolving through the guided registry, stopped building the session
+     * engine for a yoga step, or stopped mounting the native pose view, every
+     * registry test would stay green while the camera silently never appeared
+     * for a step like Chair Yoga Flow's "Stand and Sit" — the same failure
+     * shape as the original dangling sit-to-stand id, one layer further up.
+     */
+    const code = stripComments(readComponent('guided', 'guided-activity-screen.tsx'));
+
+    check(
+      'a step resolves its camera config through the guided registry',
+      code.includes('getGuidedPoseConfig(snapshot.currentStep.cameraConfigId)'),
+    );
+    check(
+      'a camera step builds the shared session engine',
+      code.includes('cameraEngineRef.current = new SessionEngine(currentStepConfig)'),
+    );
+    check(
+      'the preview waits for permission and for the engine',
+      code.includes('hasCameraPermission === true') && code.includes('hasCameraEngine'),
+    );
+    check(
+      'the preview only mounts while a camera step is running',
+      code.includes('showCameraPreview &&'),
+    );
+    check(
+      'the preview is the existing native pose view, not a second camera',
+      code.includes('<PoseTrackerView') && code.includes('onPoseFrame={handlePoseFrame}'),
+    );
+    check(
+      'pose frames are fed to the engine',
+      code.includes('const result = engine.handlePoseFrame(event)'),
+    );
+    check(
+      'the voice layer reads the engine result',
+      code.includes('voiceRef.current?.onFrame(result)'),
+    );
+  });
+
   // ==========================================================================
   // Task 6: one progress system, and no invented numbers
   // ==========================================================================
