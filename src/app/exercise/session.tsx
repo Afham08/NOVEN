@@ -18,11 +18,10 @@ import { completedFeedback, pausedFeedback, setupFeedback, type FeedbackCue } fr
 import { buildSessionMetrics, formatConsistencyLabel, formatDurationLabel, formatPaceLabel, formatRangeLabel } from '@/exercise/metrics';
 import { getExerciseConfig } from '@/exercise/pose-configs';
 import { createSessionId, createSessionRecord } from '@/exercise/session-store';
+import { sessionPhaseLabel, type SessionPhase } from '@/exercise/session-phase';
 import { sessionStore } from '@/exercise/session-storage';
 import { SessionEngine } from '@/exercise/session-engine';
 import { createExpoSpeechSink, VoiceFeedbackController } from '@/exercise/voice-feedback';
-
-type SessionPhase = 'ready' | 'running' | 'paused' | 'completed';
 
 type HudState = {
   reps: number;
@@ -304,16 +303,8 @@ export default function SessionScreen() {
     });
   };
 
-  const chipLabel =
-    phase === 'ready'
-      ? 'Ready'
-      : phase === 'running'
-        ? 'Session in progress'
-        : phase === 'paused'
-          ? 'Paused'
-          : 'Session complete';
+  const chipLabel = sessionPhaseLabel(phase);
   const chipTone = phase === 'ready' || phase === 'completed' ? 'ready' : 'accent';
-  const timerRunning = phase === 'running';
 
   // The HUD states the phase in words rather than relying on the chip, a colour,
   // or the timer — none of which are readable from across a room.
@@ -404,7 +395,7 @@ export default function SessionScreen() {
       <StatusChip label={chipLabel} tone={chipTone} />
       <SessionTimer
         seconds={seconds}
-        running={timerRunning}
+        phase={phase}
         suggestedSeconds={exercise.durationSeconds}
       />
 

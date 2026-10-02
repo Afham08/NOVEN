@@ -8,6 +8,7 @@ import { exercisesCatalog, getExerciseById } from '../src/data/exercises';
 import { getExerciseConfig, isPoseTracked, poseTrackedConfigs } from '../src/exercise/pose-configs';
 import { buildProgress, type ProgressInput } from '../src/exercise/progress';
 import { createSessionRecord, parseSessionRecord } from '../src/exercise/session-store';
+import { sessionPhaseLabel, sessionTimerCaption, type SessionPhase } from '../src/exercise/session-phase';
 import { buildSessionMetrics } from '../src/exercise/metrics';
 import type { SessionMetrics } from '../src/exercise/types';
 
@@ -608,3 +609,122 @@ export function run(): void {
     );
   });
 }
+
+/*
+ * ---------------------------------------------------------------------------
+ * The session screen describes the session's phase in TWO places: the status chip
+ * beside the camera feed, and the caption under the clock. The timer used to be
+ * handed only `running: boolean` and answered "Session in progress" or
+ * "Session paused", so a four-phase screen was described by a two-state
+ * sentence. That printed "Session paused" on the pre-Start screen - directly
+ * under a chip reading "Ready" - and again on the finished screen, under a chip
+ * reading "Session complete" and a banner reading "SESSION COMPLETE".
+ *
+ * A person cannot pause a session that has not started or that has already
+ * finished, and this audience is being asked to trust that the numbers on
+ * screen mean what they say. Both wrong readings sat under the clock, the one
+ * thing on screen they are most likely to be looking at.
+ * ---------------------------------------------------------------------------
+ */
+const SESSION_PHASES: readonly SessionPhase[] = ['ready', 'running', 'paused', 'completed'];
+
+suite('session: every phase is described honestly, and both indicators agree', () => {
+  /*
+   * The exact regression, phase by phase. "paused" is the only phase that may
+   * claim the session is paused.
+   */
+  check(
+    'only a paused session is told it is paused',
+    SESSION_PHASES.filter((phase) => sessionTimerCaption(phase) === 'Session paused').join() ===
+      'paused',
+    SESSION_PHASES.map((phase) => `${phase} -> "${sessionTimerCaption(phase)}"`).join(' | '),
+  );
+  check('a session waiting to start is not called paused', sessionTimerCaption('ready') !== 'Session paused');
+  check('a finished session is not called paused', sessionTimerCaption('completed') !== 'Session paused');
+  check('a paused session still says so', sessionTimerCaption('paused') === 'Session paused');
+  check('the running caption is unchanged', sessionTimerCaption('running') === 'Session in progress');
+
+  /*
+   * The caption has to name the state, not merely avoid the wrong word: "Done",
+   * for instance, would pass every check above while still telling the reader
+   * nothing about whether their time counted.
+   */
+  check(
+    'each caption names its own phase',
+    sessionTimerCaption('ready').includes('Ready') &&
+      sessionTimerCaption('running').includes('progress') &&
+      sessionTimerCaption('paused').includes('paused') &&
+      sessionTimerCaption('completed').includes('complete'),
+    SESSION_PHASES.map((phase) => `${phase} -> "${sessionTimerCaption(phase)}"`).join(' | '),
+  );
+  check(
+    'no two phases share a caption, so the screen never looks stuck',
+    new Set(SESSION_PHASES.map(sessionTimerCaption)).size === SESSION_PHASES.length,
+  );
+
+  /*
+   * The contradiction itself: the chip and the caption sat a few centimetres
+   * apart on the same screen, so the two wordings for one phase must agree.
+   * "Paused"/"Session paused" and "Session complete"/"Session complete" agree;
+   * "Ready"/"Ready to start" and "Session in progress" agree with themselves.
+   * Compared case-insensitively, because a chip label is title-cased and a
+   * sentence is not - "Paused" and "Session paused" are the same statement.
+   */
+  check(
+    'the chip and the caption describe each phase compatibly',
+    SESSION_PHASES.every((phase) => {
+      const label = sessionPhaseLabel(phase).toLowerCase();
+      const caption = sessionTimerCaption(phase).toLowerCase();
+      return label === caption || caption.includes(label) || label.includes(caption);
+    }),
+    SESSION_PHASES.map((phase) => `${phase} -> chip "${sessionPhaseLabel(phase)}" / caption "${sessionTimerCaption(phase)}"`).join(' | '),
+  );
+
+  check(
+    'the chip keeps the wording people are used to',
+    sessionPhaseLabel('ready') === 'Ready' &&
+      sessionPhaseLabel('paused') === 'Paused' &&
+      sessionPhaseLabel('completed') === 'Session complete',
+    SESSION_PHASES.map((phase) => `${phase} -> "${sessionPhaseLabel(phase)}"`).join(' | '),
+  );
+});
+
+suite('session: the timer is wired to the phase, not to a two-state flag', () => {
+  const screen = stripComments(read('exercise', 'session.tsx'));
+  const timer = stripComments(readComponent('session', 'session-timer.tsx'));
+
+  /*
+   * The timer must receive the phase itself. Re-introducing the boolean is
+   * exactly the defect, so it is pinned from both ends: the screen must not
+   * reduce the phase to a flag, and the component must not accept one.
+   */
+  check('the timer is given the phase itself', /<SessionTimer[\s\S]{0,200}phase=\{phase\}/.test(screen), screen.slice(screen.indexOf('<SessionTimer'), screen.indexOf('<SessionTimer') + 200));
+  check('the screen no longer reduces the phase to a boolean for the timer', !/timerRunning|phase === 'running';\s*\n\s*const/.test(screen), screen);
+  check('the timer no longer takes a running flag', !/\brunning\b\s*[:?]/.test(timer) && !/\{running \?/.test(timer), timer);
+  check('the timer reads its caption from the shared phase wording', /sessionTimerCaption\(phase\)/.test(timer), timer);
+
+  /*
+   * One definition of the phases: the screen and the timer both import the union
+   * from the shared module rather than each re-declaring it, so a fifth phase
+   * cannot be added to one side only and quietly fall through on the other.
+   */
+  const shared = fs.readFileSync(fromSrc('exercise', 'session-phase.ts'), 'utf8');
+  check(
+    'the phases are declared exactly once',
+    /export type SessionPhase = 'ready' \| 'running' \| 'paused' \| 'completed';/.test(shared) &&
+      !/type SessionPhase\s*=/.test(screen) &&
+      !/type SessionPhase\s*=/.test(timer),
+    shared,
+  );
+  check(
+    'both the screen and the timer import them from there',
+    /import \{[^}]*type SessionPhase[^}]*\} from '@\/exercise\/session-phase'/.test(screen) &&
+      /import \{[^}]*type SessionPhase[^}]*\} from '@\/exercise\/session-phase'/.test(timer),
+    `screen: ${/session-phase/.test(screen)} | timer: ${/session-phase/.test(timer)}`,
+  );
+  check(
+    'the chip reads the shared wording instead of its own ternary',
+    /const chipLabel = sessionPhaseLabel\(phase\);/.test(screen) && !/phase === 'ready'\s*\?\s*'Ready'/.test(screen),
+    screen,
+  );
+});
