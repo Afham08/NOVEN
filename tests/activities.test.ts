@@ -468,12 +468,35 @@ export function run(): void {
     check('CASE D: yesterday\'s finished run is not today', todayStatus(otherDay.records, BY_KIND.wellness, 'wellness', now).find((s) => s.activityId === activity.id)?.done === false, otherDay.records);
 
     // CASE E — an exercise record cannot stand in for a wellness one.
-    const exerciseWrite = await persist(undefined, todayNoon);
-    const asExercise = exerciseWrite.records.map((r) => ({ ...r, activityKind: undefined, stepsCompleted: undefined }));
+    // `persist(undefined)` is the legacy shape too: a guided kind and a date,
+    // but no step count, because the field did not exist when it was written.
+    const legacyWrite = await persist(undefined, todayNoon);
+    const asExercise = legacyWrite.records.map((r) => ({ ...r, activityKind: undefined, stepsCompleted: undefined }));
     check('CASE E: a camera/exercise record does not tick a wellness activity', todayStatus(asExercise, BY_KIND.wellness, 'wellness', now).every((s) => !s.done), asExercise);
 
     // CASE F — the real, round-tripped full completion is still counted.
     check('CASE F: a full completion through storage still counts as done', countDoneToday(todayStatus(fullWrite.records, BY_KIND.wellness, 'wellness', now)).done >= 1, fullWrite.records);
+
+    /*
+     * CASE G — the one thing the new check must NOT change.
+     *
+     * A record with no step count was written before the field existed. There is
+     * nothing to judge it against, so it keeps the behaviour it always had and
+     * still counts as finished today. Reading it as "incomplete" would silently
+     * un-tick real people's real history on upgrade, which would be a worse lie
+     * than the one this task fixes.
+     */
+    check('CASE G: the legacy record really has no step count', legacyWrite.records[0]?.stepsCompleted === undefined, legacyWrite.records[0]);
+    check(
+      'CASE G: a legacy record still counts as done today, as it always did',
+      todayStatus(legacyWrite.records, BY_KIND.wellness, 'wellness', now).find((s) => s.activityId === activity.id)?.done === true,
+      legacyWrite.records,
+    );
+    check(
+      'CASE G: and a legacy partial is not invented either - absent is not zero',
+      countDoneToday(todayStatus(legacyWrite.records, BY_KIND.wellness, 'wellness', now)).done >= 1,
+      legacyWrite.records,
+    );
   });
 
   // ==========================================================================
