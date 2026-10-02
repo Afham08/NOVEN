@@ -243,6 +243,54 @@ export function run(): void {
     );
   });
 
+  suite('exercise library: the detail screen offers this exercise its own history', () => {
+    /*
+     * The library's loop is choose, do, review — and the review half was only
+     * reachable from the Progress tab's mixed list, which cannot answer "how
+     * did THIS one go". These checks guard the wiring that closes that gap:
+     * the detail screen reads the real store, filters to itself through the
+     * one selector, and reopens rows through the same result screen a live
+     * finish uses. The shared list must also keep its whole-history behaviour
+     * unchanged when no exercise is named.
+     */
+    const detail = stripComments(read('exercise', '[id].tsx'));
+    check(
+      'the detail screen reads the real session store',
+      detail.includes("from '@/exercise/session-storage'") && detail.includes('store={sessionStore}'),
+    );
+    check("it lists only this exercise's sessions", detail.includes('exerciseId={exercise.id}'));
+    check('the section is labelled', detail.includes('title="Your sessions"'));
+    check(
+      'a row reopens the existing result screen',
+      detail.includes("pathname: '/exercise/result'"),
+    );
+    check(
+      'the reopened values are the same formatted params Progress uses',
+      detail.includes('formatDurationLabel(') &&
+        detail.includes('formatPaceLabel(') &&
+        detail.includes('formatRangeLabel(') &&
+        detail.includes('formatConsistencyLabel('),
+    );
+
+    const historyCode = stripComments(readComponent('session', 'session-history.tsx'));
+    check(
+      'the shared list filters through the one selector',
+      historyCode.includes('sessionsForExercise(records, exerciseId)'),
+    );
+    check(
+      'without a filter it keeps the whole history',
+      historyCode.includes('exerciseId === undefined ? records'),
+    );
+    check(
+      'the whole-history empty state is unchanged',
+      historyCode.includes('Finish an exercise, a yoga routine, or a calm moment'),
+    );
+    check(
+      'the kept-on-device note still counts the whole history',
+      historyCode.includes('All ${records.length} sessions are kept on this device'),
+    );
+  });
+
   // ==========================================================================
   // Task 6: one progress system, and no invented numbers
   // ==========================================================================

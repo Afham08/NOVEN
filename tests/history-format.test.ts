@@ -4,6 +4,7 @@ import {
   buildHistorySummary,
   describeHistorySummary,
   describeSessionCount,
+  sessionsForExercise,
   steadinessLabel,
   timeOfDayLabel,
 } from '../src/exercise/history-format';
@@ -162,5 +163,47 @@ export function run(): void {
     check('and by its real name', summary.exerciseCounts[0]?.name === 'Seated Knee Extension', summary.exerciseCounts);
     check('its unmeasured pace costs nothing', steadinessLabel(legacy) === 'Steadiness 92%');
     almostEqual(summary.totalSessions, 1);
+  });
+
+  suite('history format: one exercise can be read out of the mixed history', () => {
+    /*
+     * The progress list holds every kind of session together; the Exercise
+     * Library's detail screen asks the other question — how THIS movement went.
+     * The selector must answer only that question: the right exercise, guided
+     * routines excluded even on an id collision, and the shared history left
+     * untouched so the whole list beside it is unaffected.
+     */
+    const history = [
+      record({ id: 'a', exerciseId: 'seated-knee-extension' }),
+      record({ id: 'b', exerciseId: 'sit-to-stand' }),
+      record({ id: 'c', exerciseId: 'seated-knee-extension' }),
+      record({ id: 'd', exerciseId: 'seated-knee-extension', activityKind: 'exercise' as const }),
+      record({ id: 'e', exerciseId: 'chair-yoga-flow', activityKind: 'yoga' as const }),
+    ];
+
+    const knee = sessionsForExercise(history, 'seated-knee-extension');
+    check('only the chosen exercise is returned', knee.length === 3, knee.map((r) => r.id).join(','));
+    check(
+      'every returned row really is that exercise',
+      knee.every((r) => r.exerciseId === 'seated-knee-extension'),
+    );
+    check(
+      'the store order is preserved, newest first',
+      knee.map((r) => r.id).join(',') === 'a,c,d',
+      knee.map((r) => r.id).join(','),
+    );
+    check(
+      'a record that names its kind as an exercise still counts',
+      knee.some((r) => r.id === 'd'),
+    );
+    check(
+      'an exercise with no sessions gets an empty list',
+      sessionsForExercise(history, 'seated-arm-raise').length === 0,
+    );
+    check(
+      'a guided routine is never read out as an exercise session',
+      sessionsForExercise(history, 'chair-yoga-flow').length === 0,
+    );
+    check('the mixed history itself is untouched', history.length === 5, history.length);
   });
 }

@@ -52,6 +52,34 @@ export function steadinessLabel(record: SessionRecord): string | null {
   return `Steadiness ${record.consistencyPct}%`;
 }
 
+/**
+ * The saved sessions of ONE exercise, out of the mixed whole-history list.
+ *
+ * WHY THE LIBRARY NEEDS THIS
+ * The progress list holds every kind of session together, because that is what
+ * a whole-history list is for. The Exercise Library is where a person chooses
+ * which movement to do, and the question there is about that movement alone:
+ * "how did this go last time?". This selector answers only that question, from
+ * the same store read the whole list uses, so the two can never disagree.
+ *
+ * A record whose activityKind names a guided activity is never returned, even
+ * if a future id collision put it behind an exercise's id: a routine's session
+ * belongs on the routine's screen, and an exercise list showing one would be
+ * describing a session the exercise never had. This mirrors the exercise check
+ * `buildHistorySummary` already applies. Order is the store's own newest-first
+ * order, preserved by the filter rather than re-derived.
+ */
+export function sessionsForExercise(
+  records: readonly SessionRecord[],
+  exerciseId: string,
+): SessionRecord[] {
+  return records.filter(
+    (record) =>
+      record.exerciseId === exerciseId &&
+      (record.activityKind === undefined || record.activityKind === 'exercise'),
+  );
+}
+
 /** The smallest summary that can be built, when the history is empty. */
 export type HistorySummary = {
   totalSessions: number;

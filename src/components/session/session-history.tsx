@@ -7,7 +7,7 @@ import { Card } from '@/components/ui/card';
 import { Spacing, Type } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { formatDurationLabel, formatPaceLabel } from '@/exercise/metrics';
-import { steadinessLabel, timeOfDayLabel } from '@/exercise/history-format';
+import { sessionsForExercise, steadinessLabel, timeOfDayLabel } from '@/exercise/history-format';
 import { dayLabel, type SessionRecord, type SessionStore } from '@/exercise/session-store';
 
 export type SessionHistoryProps = {
@@ -19,6 +19,14 @@ export type SessionHistoryProps = {
   onOpenSession?: (record: SessionRecord) => void;
   /** How many sessions to show before the "Show earlier sessions" control. */
   limit?: number;
+  /**
+   * When set, only this exercise's own sessions are listed — the Exercise
+   * detail screen's "Your sessions" section. The rows, the expand control and
+   * the wording are this same list's; only the selection differs. The
+   * "kept on this device" note still counts the whole history, because what is
+   * stored on the device is every session, not the filtered view.
+   */
+  exerciseId?: string;
 };
 
 /** Most recent sessions shown before the list is cut off. */
@@ -57,7 +65,12 @@ export function describeCompletedCount(reps: number): string {
  * A row is a whole pressable target, because the audience may be tapping with a
  * finger that is not precise.
  */
-export function SessionHistory({ store, onOpenSession, limit = DEFAULT_LIMIT }: SessionHistoryProps) {
+export function SessionHistory({
+  store,
+  onOpenSession,
+  limit = DEFAULT_LIMIT,
+  exerciseId,
+}: SessionHistoryProps) {
   const theme = useTheme();
   const [records, setRecords] = useState<SessionRecord[] | null>(null);
   /** How many rows are currently revealed; starts at the screen's chosen limit. */
@@ -88,21 +101,26 @@ export function SessionHistory({ store, onOpenSession, limit = DEFAULT_LIMIT }: 
   // Not yet read: render nothing rather than a misleading "no sessions yet".
   if (records === null) return null;
 
-  const visible = records.slice(0, Math.max(0, visibleCount));
+  // What this particular list shows: the whole history, or one exercise's own.
+  const listed = exerciseId === undefined ? records : sessionsForExercise(records, exerciseId);
+  const visible = listed.slice(0, Math.max(0, visibleCount));
 
   if (visible.length === 0) {
     return (
       <Card variant="surface" gap={Spacing.two}>
-        <Text style={[styles.emptyTitle, { color: theme.heading }]}>No sessions yet</Text>
+        <Text style={[styles.emptyTitle, { color: theme.heading }]}>
+          {exerciseId === undefined ? 'No sessions yet' : 'No sessions for this exercise yet'}
+        </Text>
         <Text style={[styles.emptyBody, { color: theme.textSecondary }]}>
-          Finish an exercise, a yoga routine, or a calm moment, and it will appear
-          here.
+          {exerciseId === undefined
+            ? 'Finish an exercise, a yoga routine, or a calm moment, and it will appear here.'
+            : 'Finish this exercise and it will appear here.'}
         </Text>
       </Card>
     );
   }
 
-  const hiddenCount = records.length - visible.length;
+  const hiddenCount = listed.length - visible.length;
 
   return (
     <View style={styles.list}>
