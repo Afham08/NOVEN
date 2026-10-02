@@ -1,6 +1,6 @@
 import { localDayKey } from '../exercise/progress';
 import type { SessionRecord } from '../exercise/session-store';
-import type { GuidedActivityKind } from './types';
+import type { GuidedActivity, GuidedActivityKind } from './types';
 
 /**
  * ============================================================================
@@ -38,6 +38,24 @@ export type TodayActivityStatus = {
 };
 
 /**
+ * Did this session actually finish its activity?
+ *
+ * The session screen records how many steps ran, and GuidedSession computes that
+ * from elapsed time on purpose - its own comment explains that deriving it from
+ * "finished" would credit a five-second tap with a whole meditation. So the
+ * record already carries the truth, and reading only the record's kind and date
+ * would tick off a routine somebody abandoned halfway.
+ *
+ * A record with no step count predates the field being written, so there is
+ * nothing to judge it against and it keeps the behaviour it always had. An
+ * activity with no steps cannot be stopped short of.
+ */
+function ranEveryStep(record: SessionRecord, totalSteps: number): boolean {
+  if (typeof record.stepsCompleted !== 'number') return true;
+  return totalSteps <= 0 || record.stepsCompleted >= totalSteps;
+}
+
+/**
  * Which of a kind's activities have been finished today, in the order given.
  *
  * Unknown ids in the history are ignored rather than added, so an activity that
@@ -46,11 +64,14 @@ export type TodayActivityStatus = {
  */
 export function todayStatus(
   records: readonly SessionRecord[],
-  activities: readonly { id: string }[],
+  activities: readonly Pick<GuidedActivity, 'id' | 'steps'>[],
   kind: GuidedActivityKind,
   now: Date = new Date(),
 ): TodayActivityStatus[] {
   const today = localDayKey(now);
+
+  const stepTotals = new Map<string, number>();
+  for (const activity of activities) stepTotals.set(activity.id, activity.steps.length);
 
   const counts = new Map<string, number>();
   for (const record of records) {
@@ -60,6 +81,7 @@ export function todayStatus(
     const completedMs = Date.parse(record.completedAt);
     if (!Number.isFinite(completedMs)) continue;
     if (localDayKey(new Date(completedMs)) !== today) continue;
+    if (!ranEveryStep(record, stepTotals.get(record.exerciseId) ?? 0)) continue;
     counts.set(record.exerciseId, (counts.get(record.exerciseId) ?? 0) + 1);
   }
 

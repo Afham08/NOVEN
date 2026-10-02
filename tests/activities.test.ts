@@ -363,6 +363,120 @@ export function run(): void {
   });
 
   // ==========================================================================
+  // Today: a session that stopped short is not a finished one
+  // ==========================================================================
+  suite('today: a session that stopped short is not a finished one', async () => {
+    /*
+     * Nothing here is hand-built. Every record is produced the way the app
+     * produces one: a real GuidedSession running a real catalogue activity on a
+     * driven clock, ended early with the same End button the screen wires to
+     * finishEarly(), written through the real session store, read back out of
+     * it, and then asked the same question the Wellness screen asks.
+     *
+     * The evidence needed to answer this already exists in the record.
+     * GuidedSession counts `stepsCompleted` from elapsed time and is
+     * deliberately NOT derived from the phase - its own comment says deriving
+     * it from "finished" would credit a five-second tap with a whole
+     * meditation - so a partial session stores a truthful partial count.
+     */
+    const found = BY_KIND.wellness.find((a) => a.steps.length >= 3);
+    if (found === undefined) throw new Error('need a multi-step wellness activity');
+    const activity: GuidedActivity = found;
+
+    const now = new Date(2026, 8, 28, 14, 0, 0);
+    const todayNoon = new Date(2026, 8, 28, 12, 0, 0).toISOString();
+    const yesterdayNoon = new Date(2026, 8, 27, 12, 0, 0).toISOString();
+    const total = activity.steps.length;
+
+    /** Runs the real session for `seconds`, then ends it, and reports the truth. */
+    function runThenEnd(seconds: number) {
+      let clockMs = 1_000_000;
+      const session = new GuidedSession(activity, () => clockMs);
+      session.start();
+      clockMs += seconds * 1000;
+      session.finishEarly();
+      const snapshot = session.snapshot();
+      return { stepsCompleted: snapshot.stepsCompleted, finished: snapshot.finished };
+    }
+
+    const metrics = buildSessionMetrics({
+      reps: 0,
+      durationSeconds: 60,
+      repRanges: [],
+      rangeMinDeg: null,
+      rangeMaxDeg: null,
+    });
+
+    /** The real record builder and the real store, so nothing is faked. */
+    async function persist(stepsCompleted: number | undefined, completedAt: string) {
+      const written = new Map<string, string>();
+      const backend: KeyValueStore = {
+        getItem: async (key) => written.get(key) ?? null,
+        setItem: async (key, value) => { written.set(key, value); },
+        removeItem: async (key) => { written.delete(key); },
+      };
+      const store = createSessionStore(backend);
+      const record = createSessionRecord({
+        id: 'today-repro',
+        exerciseId: activity.id,
+        exerciseName: activity.name,
+        completedAt,
+        metrics,
+        activityKind: activity.kind,
+        ...(stepsCompleted !== undefined ? { stepsCompleted } : {}),
+      });
+      const stored = await store.saveSession(record);
+      const readBack = await store.getSessions();
+      return { stored, records: readBack };
+    }
+
+    // CASE A — every step actually ran.
+    const full = runThenEnd(totalStepSeconds(activity.steps) + 5);
+    check('a full run really does record every step', full.stepsCompleted === total, `${full.stepsCompleted}/${total}`);
+    const fullWrite = await persist(full.stepsCompleted, todayNoon);
+    check('a full run is stored', fullWrite.stored.id === 'today-repro' && fullWrite.records.length === 1, fullWrite.records);
+    check('a full run really does come back out of storage', fullWrite.records[0]?.stepsCompleted === total, fullWrite.records[0]);
+    const fullToday = todayStatus(fullWrite.records, BY_KIND.wellness, 'wellness', now);
+    check('CASE A: a finished activity is done today', fullToday.find((s) => s.activityId === activity.id)?.done === true, fullToday);
+
+    // CASE B — the critical one: the person tapped End part way through.
+    const partial = runThenEnd(activity.steps[0].seconds + 2);
+    check('ending early really does record fewer steps', partial.stepsCompleted > 0 && partial.stepsCompleted < total, `${partial.stepsCompleted}/${total}`);
+    const partialWrite = await persist(partial.stepsCompleted, todayNoon);
+    check('a partial run is still stored as a session', partialWrite.records.length === 1, partialWrite.records);
+    const partialToday = todayStatus(partialWrite.records, BY_KIND.wellness, 'wellness', now);
+    check(
+      'CASE B: a session that stopped short is NOT done today',
+      partialToday.find((s) => s.activityId === activity.id)?.done === false,
+      partialToday,
+    );
+    check(
+      'and it is not counted as a finished run either',
+      countDoneToday(partialToday).done === 0,
+      countDoneToday(partialToday),
+    );
+
+    // CASE C — started and abandoned before the first step ran out.
+    const zero = runThenEnd(1);
+    check('ending at once really does record zero steps', zero.stepsCompleted === 0, zero.stepsCompleted);
+    const zeroWrite = await persist(zero.stepsCompleted, todayNoon);
+    const zeroToday = todayStatus(zeroWrite.records, BY_KIND.wellness, 'wellness', now);
+    check('CASE C: a session that ran no step is NOT done today', zeroToday.find((s) => s.activityId === activity.id)?.done === false, zeroToday);
+
+    // CASE D — a finished session from another day is still not today.
+    const otherDay = await persist(total, yesterdayNoon);
+    check('CASE D: yesterday\'s finished run is not today', todayStatus(otherDay.records, BY_KIND.wellness, 'wellness', now).find((s) => s.activityId === activity.id)?.done === false, otherDay.records);
+
+    // CASE E — an exercise record cannot stand in for a wellness one.
+    const exerciseWrite = await persist(undefined, todayNoon);
+    const asExercise = exerciseWrite.records.map((r) => ({ ...r, activityKind: undefined, stepsCompleted: undefined }));
+    check('CASE E: a camera/exercise record does not tick a wellness activity', todayStatus(asExercise, BY_KIND.wellness, 'wellness', now).every((s) => !s.done), asExercise);
+
+    // CASE F — the real, round-tripped full completion is still counted.
+    check('CASE F: a full completion through storage still counts as done', countDoneToday(todayStatus(fullWrite.records, BY_KIND.wellness, 'wellness', now)).done >= 1, fullWrite.records);
+  });
+
+  // ==========================================================================
   // Route params
   // ==========================================================================
   suite('result params: a value from a link cannot become a claim', () => {
