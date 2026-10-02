@@ -9,6 +9,7 @@ import {
 
 import { describeLength, describeStepPosition } from '@/activities/activity-format';
 import { GuidedSession, type GuidedSnapshot } from '@/activities/guided-session';
+import { beginStep, emptyRepTally, measuredReps, observeStepReps, type GuidedRepTally } from '@/activities/guided-reps';
 import {
   MeditationPostureTracker,
   type MeditationGuidance,
@@ -87,6 +88,19 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
     reps: 0,
     feedback: { text: '', tone: 'neutral' },
   });
+
+  /**
+   * Repetitions measured across the whole session, for the saved record.
+   *
+   * `cameraHud.reps` is only ever the CURRENT step's count, and a new engine is
+   * built for each camera step counting from zero. So the count is real but
+   * per-step, and the session total has to be accumulated here or it is lost as
+   * soon as the routine moves past the step that earned it.
+   *
+   * A ref rather than state: it is written on every camera frame and read once,
+   * at completion, and must never cause a render.
+   */
+  const repTallyRef = useRef<GuidedRepTally>(emptyRepTally());
 
   const running = snapshot.phase === 'running';
 
@@ -241,6 +255,10 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
   useEffect(() => {
     if (isCameraStep && currentStepConfig && !isMeditation) {
       cameraEngineRef.current = new SessionEngine(currentStepConfig);
+      // The new engine counts from zero, so its readings are all new
+      // repetitions: the previous step's contribution stays in the total, but
+      // this step starts folding from scratch.
+      repTallyRef.current = beginStep(repTallyRef.current);
       // Defer all state updates to avoid synchronous setState in effect
       setTimeout(() => {
         setHasCameraEngine(true);
@@ -306,6 +324,9 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
       const engine = cameraEngineRef.current;
       if (!engine) return;
       const result = engine.handlePoseFrame(event);
+      // Fold the engine's own count in before rendering, so the HUD number and
+      // the persisted number come from the same measurement.
+      repTallyRef.current = observeStepReps(repTallyRef.current, result.reps);
       setCameraHud(result);
       // The voice layer reads the engine's own decision — the same object the
       // HUD renders — so the speaker can never disagree with the screen. Its
@@ -321,10 +342,12 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
    * `how` is only ever the user's own decision, passed through for the wording of
    * what the result screen says. It is a label, not a number the app invents.
    *
-   * The record is built from the real `SessionMetrics` with no repetitions, no
-   * pose angles and no steadiness, because none of those were measured here. The
-   * same builder produces null for every one of them, so a guided session cannot
-   * acquire a number it has no observation behind.
+   * The record is built from the real `SessionMetrics`. Its repetitions are the
+   * ones the camera steps' engines counted; its pose angles and steadiness stay
+   * null, because a guided session observes no range per repetition and no
+   * steadiness figure. The same builder produces null for each of those rather
+   * than a plausible substitute, so a guided session cannot acquire a number it
+   * has no observation behind.
    *
    * `leavingRef` makes this once-only, so a double tap on End, a re-render, or the
    * auto-save at the end of a session racing a press cannot record the same
@@ -349,8 +372,19 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
        */
       voiceRef.current?.announceCompletion(0);
 
+      /*
+       * The repetitions are the ones the camera steps' engines actually counted,
+       * summed across the steps that reached them. They were shown on the HUD as
+       * they happened, so writing anything else here would put a number in the
+       * history that contradicts what the person just watched.
+       *
+       * The remaining fields stay null/empty for the same reason they always
+       * have: no guided session observes a range per repetition or a steadiness
+       * figure, so the builder is given nothing and returns null rather than a
+       * fabricated number. A routine with no camera step keeps a true zero.
+       */
       const metrics = buildSessionMetrics({
-        reps: 0,
+        reps: measuredReps(repTallyRef.current),
         durationSeconds: final.elapsedSeconds,
         repRanges: [],
         rangeMinDeg: null,
@@ -468,6 +502,7 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
    */
   const startFresh = useCallback(() => {
     leavingRef.current = false;
+    repTallyRef.current = emptyRepTally();
     autoSavedRef.current = false;
     setSaving(false);
     announcedStepRef.current = null;

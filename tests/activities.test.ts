@@ -18,10 +18,13 @@ import {
 import { GuidedSession, PROGRESS_MAX } from '../src/activities/guided-session';
 import { GUIDED_ACTIVITY_KINDS, totalStepSeconds, isGuidedActivityKind, type GuidedActivity } from '../src/activities/types';
 import { countDoneToday, todayStatus } from '../src/activities/today';
-import { getExerciseConfig, getGuidedPoseConfig } from '../src/exercise/pose-configs';
+import { getExerciseConfig, getGuidedPoseConfig, SIT_TO_STAND } from '../src/exercise/pose-configs';
 import { parseSecondsParam, parseStepCountParam, wholeNumberParam, parseSaveStatusParam, describeSaveStatus, type SaveStatus } from '../src/activities/result-params';
+import { beginStep, emptyRepTally, measuredReps, observeStepReps, type GuidedRepTally } from '../src/activities/guided-reps';
 import { buildSessionMetrics } from '../src/exercise/metrics';
+import { SessionEngine } from '../src/exercise/session-engine';
 import { createSessionRecord, createSessionStore, SESSION_HISTORY_KEY, type KeyValueStore, type SessionRecord } from '../src/exercise/session-store';
+import type { LandmarkEventPayload, PoseFrameEventPayload, PoseLandmarkName } from '../modules/pose-tracker';
 
 /**
  * A clock the tests drive by hand.
@@ -688,5 +691,244 @@ export function run(): void {
     const store = createSessionStore(backend);
     const status = await attemptSave(store, guidedRecord('completed-one', '2026-09-03T09:00:00.000Z'));
     check('a normally completed session saves and is reported as saved', status === 'saved', status);
+  });
+
+  /*
+   * A guided camera step counts repetitions on screen. The record used to be
+   * built with a literal `reps: 0` whatever the engine had counted, so the
+   * history held a number that contradicted the HUD the person had just watched.
+   * These drive the real engine and assert the counted value is what is stored.
+   */
+
+  const REP_SIDE_NAMES: Record<'left' | 'right', { hip: PoseLandmarkName; knee: PoseLandmarkName; ankle: PoseLandmarkName }> = {
+    left: { hip: 'LEFT_HIP', knee: 'LEFT_KNEE', ankle: 'LEFT_ANKLE' },
+    right: { hip: 'RIGHT_HIP', knee: 'RIGHT_KNEE', ankle: 'RIGHT_ANKLE' },
+  };
+  const REP_SIDE_GEOMETRY = {
+    left: { hip: { x: 0.46, y: 0.3 }, knee: { x: 0.46, y: 0.5 } },
+    right: { hip: { x: 0.54, y: 0.3 }, knee: { x: 0.54, y: 0.5 } },
+  };
+  const ANKLE_REACH = 0.28;
+  const STILL_KNEE = 90;
+
+  function ankleFor(hip: { x: number; y: number }, knee: { x: number; y: number }, angleDeg: number) {
+    const hipDir = Math.atan2(hip.y - knee.y, hip.x - knee.x);
+    const rad = hipDir - (angleDeg * Math.PI) / 180;
+    return { x: knee.x + Math.cos(rad) * ANKLE_REACH, y: knee.y + Math.sin(rad) * ANKLE_REACH };
+  }
+
+  function repPose(angle: number): LandmarkEventPayload[] {
+    const landmarks: LandmarkEventPayload[] = [];
+    for (const side of ['left', 'right'] as const) {
+      const { hip, knee } = REP_SIDE_GEOMETRY[side];
+      const names = REP_SIDE_NAMES[side];
+      const ankle = ankleFor(hip, knee, angle);
+      for (const [name, point] of [[names.hip, hip], [names.knee, knee], [names.ankle, ankle]] as const) {
+        landmarks.push({ name, x: point.x, y: point.y, z: 0, visibility: 1 });
+      }
+    }
+    return landmarks;
+  }
+
+  function repFrame(landmarks: LandmarkEventPayload[], timestampMs: number) {
+    return { nativeEvent: { timestampMs, presence: 'tracked', landmarks } as PoseFrameEventPayload };
+  }
+
+  /**
+   * Feeds one frame the way the screen does: the engine counts, and its own
+   * running total is folded into the session tally.
+   */
+  function feedLikeScreen(
+    tally: GuidedRepTally,
+    engine: SessionEngine,
+    timestampMs: number,
+  ): GuidedRepTally {
+    const result = engine.handlePoseFrame(repFrame(repPose(STILL_KNEE), timestampMs));
+    return observeStepReps(tally, result.reps);
+  }
+
+  /** Holds still long enough for the readiness gate to grant counting. */
+  function reachReadyLikeScreen(tally: GuidedRepTally, engine: SessionEngine): GuidedRepTally {
+    let current = tally;
+    for (let i = 0; i < 14; i += 1) current = feedLikeScreen(current, engine, i * 100);
+    return current;
+  }
+
+  /** Drives `cycles` full out-and-back stand/sit cycles through a camera step. */
+  function driveStandSitCycles(tally: GuidedRepTally, engine: SessionEngine, cycles: number): GuidedRepTally {
+    const CYCLE = [120, 140, 160, 176, 176, 160, 140, 120, STILL_KNEE, STILL_KNEE];
+    let current = tally;
+    let t = 1400;
+    for (let cycle = 0; cycle < cycles; cycle += 1) {
+      for (const angle of CYCLE) {
+        const result = engine.handlePoseFrame(repFrame(repPose(angle), t));
+        current = observeStepReps(current, result.reps);
+        t += 100;
+      }
+    }
+    return current;
+  }
+
+  /** Builds the record exactly as the guided screen does, from a real tally. */
+  function recordFromTally(id: string, tally: GuidedRepTally, stepsCompleted: number): SessionRecord {
+    return createSessionRecord({
+      id,
+      exerciseId: 'chair-yoga-flow',
+      exerciseName: 'Chair Yoga Flow',
+      completedAt: '2026-09-03T09:00:00.000Z',
+      metrics: buildSessionMetrics({
+        reps: measuredReps(tally),
+        durationSeconds: 600,
+        repRanges: [],
+        rangeMinDeg: null,
+        rangeMaxDeg: null,
+      }),
+      activityKind: 'yoga',
+      stepsCompleted,
+    });
+  }
+
+  suite('guided reps: what the camera counted is what gets persisted', async () => {
+    // The config the "Stand and Sit" step actually resolves to.
+    const standStep = guidedCatalog('yoga')
+      .find((a) => a.id === 'chair-yoga-flow')
+      ?.steps.find((s) => s.cameraConfigId === 'sit-to-stand');
+    check('the guided camera step resolves a real config', standStep !== undefined, standStep?.cameraConfigId);
+    check('and that config is the one driven below', standStep?.cameraConfigId === SIT_TO_STAND.id, standStep?.cameraConfigId);
+
+    const engine = new SessionEngine(SIT_TO_STAND);
+    let tally = reachReadyLikeScreen(emptyRepTally(), engine);
+    check('the gate is ready before anything is counted', engine.readinessPhase === 'ready', engine.readinessPhase);
+    tally = driveStandSitCycles(tally, engine, 3);
+
+    const measured = engine.reps;
+    check('the engine really counted repetitions', measured > 0, measured);
+    check('the tally matches the engine exactly', measuredReps(tally) === measured, { tally: measuredReps(tally), measured });
+
+    const record = recordFromTally('with-reps', tally, 6);
+    check('the record carries the measured count, not a placeholder', record.reps === measured, record.reps);
+    check('it is not the old hardcoded zero', record.reps !== 0, record.reps);
+
+    const written = new Map<string, string>();
+    const backend: KeyValueStore = {
+      getItem: async (key) => written.get(key) ?? null,
+      setItem: async (key, value) => { written.set(key, value); },
+      removeItem: async (key) => { written.delete(key); },
+    };
+    const store = createSessionStore(backend);
+    const status = await attemptSave(store, record);
+    check('it saves successfully', status === 'saved', status);
+    const stored = (await store.getSessions()).find((entry) => entry.id === 'with-reps');
+    check('the stored history still holds the measured count', stored?.reps === measured, stored?.reps);
+  });
+
+  suite('guided reps: a genuine zero stays zero', async () => {
+    // A routine that never reaches a camera step measures nothing. That is a
+    // real zero and must be persisted as one rather than invented into a number.
+    const record = recordFromTally('no-reps', emptyRepTally(), 3);
+    check('a routine with no measured reps persists zero', record.reps === 0, record.reps);
+
+    // Reaching the step and never completing a repetition is also a true zero.
+    const engine = new SessionEngine(SIT_TO_STAND);
+    let tally = reachReadyLikeScreen(emptyRepTally(), engine);
+    check('being ready but motionless counts nothing', engine.reps === 0 && measuredReps(tally) === 0, { engine: engine.reps, tally: measuredReps(tally) });
+    const stillRecord = recordFromTally('still-reps', tally, 6);
+    check('and that is persisted as zero', stillRecord.reps === 0, stillRecord.reps);
+
+    const written = new Map<string, string>();
+    const backend: KeyValueStore = {
+      getItem: async (key) => written.get(key) ?? null,
+      setItem: async (key, value) => { written.set(key, value); },
+      removeItem: async (key) => { written.delete(key); },
+    };
+    const store = createSessionStore(backend);
+    await attemptSave(store, stillRecord);
+    const stored = (await store.getSessions()).find((entry) => entry.id === 'still-reps');
+    check('the stored zero survives the round trip', stored?.reps === 0, stored?.reps);
+  });
+
+  suite('guided reps: several camera steps accumulate instead of overwriting', () => {
+    const first = new SessionEngine(SIT_TO_STAND);
+    let tally = reachReadyLikeScreen(emptyRepTally(), first);
+    tally = driveStandSitCycles(tally, first, 2);
+    const afterFirst = measuredReps(tally);
+    check('the first camera step counted something', afterFirst > 0, afterFirst);
+
+    // The screen rebuilds the engine per step, so the new one starts at zero
+    // while the session total has to carry on.
+    tally = beginStep(tally);
+    check('starting a new step does not discard the total', measuredReps(tally) === afterFirst, measuredReps(tally));
+    const second = new SessionEngine(SIT_TO_STAND);
+    tally = reachReadyLikeScreen(tally, second);
+    tally = driveStandSitCycles(tally, second, 2);
+
+    const secondOnly = measuredReps(tally) - afterFirst;
+    check('the second step contributes its own repetitions', secondOnly > 0, secondOnly);
+    check('the total is the sum, not the last step alone', measuredReps(tally) === afterFirst + secondOnly, measuredReps(tally));
+    check('and it is never less than either step', measuredReps(tally) > Math.max(afterFirst, secondOnly), measuredReps(tally));
+  });
+
+  suite('guided reps: the tally never invents a repetition', () => {
+    check('an untouched session has no repetitions', measuredReps(emptyRepTally()) === 0, measuredReps(emptyRepTally()));
+
+    // Re-reading the same engine total happens on every frame; it must not
+    // count the same repetition again.
+    const once = observeStepReps(emptyRepTally(), 3);
+    check('the first reading of a count is taken', measuredReps(once) === 3, measuredReps(once));
+    for (let i = 0; i < 20; i += 1) {
+      check(`re-reading the same total adds nothing (frame ${i})`, measuredReps(observeStepReps(once, 3)) === 3, measuredReps(observeStepReps(once, 3)));
+    }
+
+    // Only the increase is new: the engine's total is cumulative, not per-frame.
+    const grown = observeStepReps(once, 5);
+    check('a larger total adds only the difference', measuredReps(grown) === 5, measuredReps(grown));
+
+    check('a total below the folded count is ignored', measuredReps(observeStepReps(grown, 2)) === 5, measuredReps(observeStepReps(grown, 2)));
+    check('a negative reading is ignored', measuredReps(observeStepReps(grown, -4)) === 5, measuredReps(observeStepReps(grown, -4)));
+    check('a non-finite reading is ignored', measuredReps(observeStepReps(grown, Number.NaN)) === 5, measuredReps(observeStepReps(grown, Number.NaN)));
+    check('the total never exceeds what was actually observed', measuredReps(grown) <= 5, measuredReps(grown));
+  });
+
+  suite('guided reps: exercise session records are untouched', async () => {
+    // An exercise record carries its own rep count and must not be routed
+    // through the guided tally at all.
+    const metrics = buildSessionMetrics({
+      reps: 7,
+      durationSeconds: 300,
+      repRanges: [150, 152, 148],
+      rangeMinDeg: 90,
+      rangeMaxDeg: 170,
+    });
+    const exercise = createSessionRecord({
+      id: 'exercise-one',
+      exerciseId: 'seated-knee-extension',
+      exerciseName: 'Seated Knee Extension',
+      completedAt: '2026-09-03T09:00:00.000Z',
+      metrics,
+    });
+    check('an exercise record keeps its own repetitions', exercise.reps === 7, exercise.reps);
+    check('and its measured range is still recorded', exercise.rangeMinDeg === 90 && exercise.rangeMaxDeg === 170, { min: exercise.rangeMinDeg, max: exercise.rangeMaxDeg });
+    check('it has no guided step count', exercise.stepsCompleted === undefined, exercise.stepsCompleted);
+    check('the guided tally has no say over it', measuredReps(emptyRepTally()) === 0 && exercise.reps === 7, exercise.reps);
+
+    // The two kinds coexist in one history without either being rewritten.
+    const written = new Map<string, string>();
+    const backend: KeyValueStore = {
+      getItem: async (key) => written.get(key) ?? null,
+      setItem: async (key, value) => { written.set(key, value); },
+      removeItem: async (key) => { written.delete(key); },
+    };
+    const store = createSessionStore(backend);
+    const engine = new SessionEngine(SIT_TO_STAND);
+    let tally = driveStandSitCycles(reachReadyLikeScreen(emptyRepTally(), engine), engine, 2);
+    await attemptSave(store, exercise);
+    await attemptSave(store, recordFromTally('yoga-one', tally, 6));
+
+    const all = await store.getSessions();
+    const storedExercise = all.find((entry) => entry.id === 'exercise-one');
+    const storedYoga = all.find((entry) => entry.id === 'yoga-one');
+    check('the exercise record is unchanged after a guided session is saved', storedExercise?.reps === 7, storedExercise?.reps);
+    check('the guided record kept its measured count', storedYoga?.reps === engine.reps, { stored: storedYoga?.reps, measured: engine.reps });
+    check('both records survive side by side', all.length === 2, all.map((entry) => entry.id));
   });
 }

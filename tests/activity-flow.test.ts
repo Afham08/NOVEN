@@ -562,4 +562,22 @@ export function run(): void {
     check('it no longer decides the save from how the session ended', !/ranToTheEnd \? 'Yes'/.test(result), result);
     check('no bare Yes is left beside the save row', !/label="Saved to your history"\s*value="Yes/.test(result), result);
   });
+
+  suite('guided reps: the screen folds measured repetitions into the saved record', () => {
+    /*
+     * The counting and the arithmetic are unit tested in activities.test.ts. What
+     * no unit test can reach is the WIRING: this harness has no React renderer,
+     * so if the screen stopped folding the engine's count in, or went back to a
+     * literal zero, every tally test would stay green while the history recorded
+     * 0 against a HUD that had just counted N.
+     */
+    const screen = stripComments(readComponent('guided', 'guided-activity-screen.tsx'));
+
+    check('each camera frame folds the engine count into the tally', /observeStepReps\(repTallyRef\.current, result\.reps\)/.test(screen), screen);
+    check('a rebuilt engine starts a new step contribution', /beginStep\(repTallyRef\.current\)/.test(screen), screen);
+    check('the saved metrics are built from the measured tally', /buildSessionMetrics\(\{\s*reps: measuredReps\(repTallyRef\.current\)/.test(screen), screen);
+    check('it does not save a hardcoded zero any more', !/buildSessionMetrics\(\{\s*reps: 0/.test(screen), screen);
+    check('starting again clears the previous session total', /repTallyRef\.current = emptyRepTally\(\)/.test(screen), screen);
+    check('the unmeasured fields stay unmeasured', /rangeMinDeg: null/.test(screen) && /rangeMaxDeg: null/.test(screen) && /repRanges: \[\]/.test(screen), screen);
+  });
 }
