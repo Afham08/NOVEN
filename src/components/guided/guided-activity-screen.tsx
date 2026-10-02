@@ -14,6 +14,7 @@ import {
   type MeditationGuidance,
 } from '@/activities/meditation-guidance';
 import type { GuidedActivity } from '@/activities/types';
+import type { SaveStatus } from '@/activities/result-params';
 import { buildSessionMetrics } from '@/exercise/metrics';
 import { createSessionId, createSessionRecord } from '@/exercise/session-store';
 import { createExpoSpeechSink, VoiceFeedbackController } from '@/exercise/voice-feedback';
@@ -367,15 +368,26 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
       });
 
       /*
-       * Fire and forget, exactly as the camera session saves its own record. A
-       * slow or failing write must not stand between the person and their
-       * result, and the result screen is rendered from values already in hand
-       * rather than by reading this record back, so a failed write costs the
-       * history row and nothing else.
+       * Awaited, not fired and forgotten. The result screen tells the person
+       * whether their history was written, and that sentence must not be
+       * invented here: swallowing the rejection and navigating anyway would still
+       * render "Saved to your history" on the next screen, which is the one claim
+       * on it that the person cannot check for themselves.
+       *
+       * A failing write is neither fatal nor hidden. `saveSession` refuses rather
+       * than overwrite a history it could not read, so letting it reject is
+       * exactly what protects the sessions already on the device; the outcome is
+       * then carried across as the confirmed status the result screen may report.
        */
-      void sessionStore.saveSession(record).catch(() => {
-        // Intentionally swallowed — see above.
-      });
+      let saveStatus: SaveStatus = 'failed';
+      try {
+        await sessionStore.saveSession(record);
+        saveStatus = 'saved';
+      } catch {
+        // The write did not land. Reported to the person on the result screen
+        // rather than swallowed, and deliberately not retried: a history that
+        // could not be read is not something a second write could safely fix.
+      }
 
       /*
        * `replace`, not `push`. The result is the end of this session, and leaving
@@ -390,6 +402,7 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
           steps: String(final.stepsCompleted),
           seconds: String(final.elapsedSeconds),
           how,
+          saved: saveStatus,
         },
       });
     },

@@ -535,4 +535,31 @@ export function run(): void {
     check('it offers no way to tick something by hand', !/markDone|toggleDone|onToggle/.test(code), code);
     check('a day view still works with no done ids', guidedActivitiesForDay('wellness', []).every((e) => !e.done));
   });
+
+  suite('saving a session: the result screen only ever claims a write that landed', () => {
+    /*
+     * The wording itself is unit tested in activities.test.ts. What no unit test
+     * can reach is the WIRING: this harness has no React renderer, so nothing
+     * exercises the screen bodies. If the guided screen went back to swallowing
+     * the rejection, or stopped passing the outcome on, every save-status test
+     * would still pass while a failed write rendered "Yes" again.
+     */
+    const screen = stripComments(readComponent('guided', 'guided-activity-screen.tsx'));
+    const result = stripComments(read('activity-result.tsx'));
+
+    check('the guided screen waits for the write instead of discarding it', /await sessionStore\.saveSession\(record\)/.test(screen), screen);
+    check('it no longer fires the write away and swallows it', !/void sessionStore\.saveSession/.test(screen), screen);
+    check(
+      'the write outcome becomes the status it reports',
+      /let saveStatus[^=]*= 'failed'/.test(screen) &&
+        /await sessionStore\.saveSession\(record\);\s*saveStatus = 'saved'/.test(screen),
+      screen,
+    );
+    check('it passes that outcome to the result screen', /saved: saveStatus/.test(screen), screen);
+
+    check('the result screen reads the reported outcome', /parseSaveStatusParam\(saved\)/.test(result), result);
+    check('it phrases the save from that outcome', /describeSaveStatus\(/.test(result), result);
+    check('it no longer decides the save from how the session ended', !/ranToTheEnd \? 'Yes'/.test(result), result);
+    check('no bare Yes is left beside the save row', !/label="Saved to your history"\s*value="Yes/.test(result), result);
+  });
 }

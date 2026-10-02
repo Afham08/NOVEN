@@ -19,8 +19,9 @@ import { GuidedSession, PROGRESS_MAX } from '../src/activities/guided-session';
 import { GUIDED_ACTIVITY_KINDS, totalStepSeconds, isGuidedActivityKind, type GuidedActivity } from '../src/activities/types';
 import { countDoneToday, todayStatus } from '../src/activities/today';
 import { getExerciseConfig, getGuidedPoseConfig } from '../src/exercise/pose-configs';
-import { parseSecondsParam, parseStepCountParam, wholeNumberParam } from '../src/activities/result-params';
-import type { SessionRecord } from '../src/exercise/session-store';
+import { parseSecondsParam, parseStepCountParam, wholeNumberParam, parseSaveStatusParam, describeSaveStatus, type SaveStatus } from '../src/activities/result-params';
+import { buildSessionMetrics } from '../src/exercise/metrics';
+import { createSessionRecord, createSessionStore, SESSION_HISTORY_KEY, type KeyValueStore, type SessionRecord } from '../src/exercise/session-store';
 
 /**
  * A clock the tests drive by hand.
@@ -537,5 +538,155 @@ export function run(): void {
       done.stepsCompleted,
     );
     check('the routine finishes normally', done.phase === 'finished', done.phase);
+  });
+
+  /*
+   * The result screen once answered "Saved to your history" from how the session
+   * had ended, while the guided screen had already thrown the write away without
+   * looking at whether it landed. So a full routine whose save failed still
+   * reported "Yes". These pin the claim to the write's real outcome.
+   */
+  suite('activity result: the save claim follows the write, not how the session ended', () => {
+    check(
+      'a save that landed says yes',
+      describeSaveStatus(parseSaveStatusParam('saved'), true, false) === 'Yes',
+    );
+    check(
+      'a save that landed keeps the part-finished wording for an early stop',
+      describeSaveStatus(parseSaveStatusParam('saved'), false, true) === 'Yes, part finished',
+    );
+
+    /*
+     * The dangerous cases are every combination of a session that did NOT get
+     * written. None of them may produce a claim of success, however complete the
+     * routine was or however it ended.
+     */
+    for (const status of [null, 'failed'] as const) {
+      for (const ranToTheEnd of [true, false]) {
+        for (const stopped of [true, false]) {
+          const shown = describeSaveStatus(status, ranToTheEnd, stopped);
+          check(
+            `an unwritten session never claims a save (${String(status)}, end=${ranToTheEnd}, stopped=${stopped})`,
+            !/^Yes\b/.test(shown),
+            shown,
+          );
+        }
+      }
+    }
+
+    check(
+      'a failed save says so in plain words',
+      describeSaveStatus(parseSaveStatusParam('failed'), true, false) === 'Not saved',
+    );
+    check(
+      'an unconfirmed write is not reported as a failure either',
+      describeSaveStatus(parseSaveStatusParam(undefined), true, false) === 'Not confirmed',
+    );
+
+    // The status crosses as data, so a deep link cannot invent its own sentence.
+    check('a hand-edited status cannot claim a save', describeSaveStatus(parseSaveStatusParam('true'), true, false) === 'Not confirmed');
+    check('a nonsense status cannot claim a save', describeSaveStatus(parseSaveStatusParam('probably'), true, false) === 'Not confirmed');
+    check('a repeated status key is ambiguous, so it is refused', parseSaveStatusParam(['saved', 'failed']) === null);
+    check('the status survives a query-string round trip', parseSaveStatusParam(' saved ') === 'saved');
+  });
+
+  /** A stored guided session, built the way the guided screen builds one. */
+  const guidedRecord = (id: string, completedAt: string): SessionRecord =>
+    createSessionRecord({
+      id,
+      exerciseId: 'chair-yoga-flow',
+      exerciseName: 'Chair Yoga Flow',
+      completedAt,
+      metrics: buildSessionMetrics({
+        reps: 0,
+        durationSeconds: 600,
+        repRanges: [],
+        rangeMinDeg: null,
+        rangeMaxDeg: null,
+      }),
+      activityKind: 'yoga',
+      stepsCompleted: 6,
+    });
+
+  /** Reports the save the way the guided screen now does: the write's own outcome. */
+  const attemptSave = async (store: { saveSession(r: SessionRecord): Promise<SessionRecord> }, record: SessionRecord): Promise<SaveStatus> => {
+    try {
+      await store.saveSession(record);
+      return 'saved';
+    } catch {
+      return 'failed';
+    }
+  };
+
+  suite('activity result: a guided save that lands is reported as saved', async () => {
+    const written = new Map<string, string>();
+    const backend: KeyValueStore = {
+      getItem: async (key) => written.get(key) ?? null,
+      setItem: async (key, value) => { written.set(key, value); },
+      removeItem: async (key) => { written.delete(key); },
+    };
+    const store = createSessionStore(backend);
+    const record = guidedRecord('saved-one', '2026-09-03T09:00:00.000Z');
+
+    const status = await attemptSave(store, record);
+    check('the write reports itself as landed', status === 'saved', status);
+    check(
+      'so the result screen says yes',
+      describeSaveStatus(parseSaveStatusParam(status), true, false) === 'Yes',
+    );
+    const all = await store.getSessions();
+    check('and the record really is in the history', all.some((entry) => entry.id === 'saved-one'), all.map((entry) => entry.id));
+  });
+
+  suite('activity result: a failed guided save is reported, and loses nothing', async () => {
+    const prior = [guidedRecord('keep-1', '2026-09-01T09:00:00.000Z'), guidedRecord('keep-2', '2026-09-02T09:00:00.000Z')];
+    const seed = JSON.stringify(prior);
+    // Reads answer, writes refuse: what a full or unavailable store looks like.
+    const backend: KeyValueStore = {
+      getItem: async () => seed,
+      setItem: async () => { throw new Error('storage is full'); },
+      removeItem: async () => {},
+    };
+    const store = createSessionStore(backend);
+
+    const status = await attemptSave(store, guidedRecord('never-stored', '2026-09-03T09:00:00.000Z'));
+    check('the write is reported as failed', status === 'failed', status);
+    check(
+      'the result screen does not claim a save, even for a completed routine',
+      describeSaveStatus(parseSaveStatusParam(status), true, false) === 'Not saved',
+    );
+
+    // A failed save must cost the new row and nothing that was already there.
+    const after = await store.getSessions();
+    const ids = after.map((entry) => entry.id);
+    check('every session already on the device survives', ids.includes('keep-1') && ids.includes('keep-2'), ids);
+    check('nothing extra was invented', after.length === prior.length, ids);
+    check('the session that failed to write is absent', !ids.includes('never-stored'), ids);
+  });
+
+  suite('activity result: completion itself is untouched by the save flow', async () => {
+    // The change was to how the save is REPORTED, so the session still finishes
+    // exactly as before and its record still saves through the same store.
+    const activity = guidedCatalog('yoga').find((a) => a.id === 'chair-yoga-flow');
+    check('chair yoga flow is still in the catalogue', activity !== undefined, activity?.id);
+    if (activity === undefined) return;
+
+    const clock = fakeClock();
+    const session = new GuidedSession(activity, clock.now);
+    session.start();
+    clock.advance(activity.durationSeconds);
+    const done = session.snapshot();
+    check('it still completes every step', done.stepsCompleted === activity.steps.length, done.stepsCompleted);
+    check('it still reaches the finished phase', done.phase === 'finished', done.phase);
+
+    const written = new Map<string, string>();
+    const backend: KeyValueStore = {
+      getItem: async (key) => written.get(key) ?? null,
+      setItem: async (key, value) => { written.set(key, value); },
+      removeItem: async (key) => { written.delete(key); },
+    };
+    const store = createSessionStore(backend);
+    const status = await attemptSave(store, guidedRecord('completed-one', '2026-09-03T09:00:00.000Z'));
+    check('a normally completed session saves and is reported as saved', status === 'saved', status);
   });
 }

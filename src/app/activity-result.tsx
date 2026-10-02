@@ -4,7 +4,7 @@ import { StyleSheet, Text, View } from 'react-native';
 
 import { describeLength } from '@/activities/activity-format';
 import { findGuidedActivity } from '@/activities/catalog';
-import { parseSecondsParam, parseStepCountParam } from '@/activities/result-params';
+import { parseSaveStatusParam, parseSecondsParam, parseStepCountParam, describeSaveStatus } from '@/activities/result-params';
 import { Screen } from '@/components/layout/screen';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -26,11 +26,12 @@ import { useTheme } from '@/hooks/use-theme';
  * wording and the totals can only come from the catalogue.
  */
 export default function ActivityResultScreen() {
-  const { id, steps, seconds, how } = useLocalSearchParams<{
+  const { id, steps, seconds, how, saved } = useLocalSearchParams<{
     id?: string;
     steps?: string;
     seconds?: string;
     how?: string;
+    saved?: string;
   }>();
   const router = useRouter();
   const theme = useTheme();
@@ -69,6 +70,7 @@ export default function ActivityResultScreen() {
   const done = Math.min(stepsCompleted, totalSteps);
   const runSeconds = Math.min(elapsedSeconds, activity.durationSeconds);
   const ranToTheEnd = done === totalSteps;
+  const stopped = how === 'stopped';
 
   return (
     <Screen>
@@ -95,10 +97,16 @@ export default function ActivityResultScreen() {
       <Card variant="surface" gap={Spacing.four}>
         <InfoRow stacked label="Time" value={describeLength(runSeconds)} />
         <InfoRow stacked label="Planned time" value={describeLength(activity.durationSeconds)} />
+        {/*
+         * Whether the history write landed, not how the session ended. A full
+         * routine whose write failed is still an unsaved session, and claiming
+         * otherwise here would be the one number on this screen the person has no
+         * way to check until the history page contradicts it.
+         */}
         <InfoRow
           stacked
           label="Saved to your history"
-          value={ranToTheEnd ? 'Yes' : how === 'stopped' ? 'Yes, part finished' : 'Yes'}
+          value={describeSaveStatus(parseSaveStatusParam(saved), ranToTheEnd, stopped)}
         />
       </Card>
 
