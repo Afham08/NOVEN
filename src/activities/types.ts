@@ -4,6 +4,7 @@
 import type { SessionKind } from '../exercise/session-store';
 
 import type { MeditationPostureExpectation } from './meditation-guidance';
+import type { YogaPoseRuleId } from './yoga-poses';
 
 /**
  * ============================================================================
@@ -48,6 +49,25 @@ export type GuidedStep = {
    * or can be manually advanced.
    */
   cameraConfigId?: string;
+  /**
+   * Optional id of a static yoga pose rule from yoga-poses.ts.
+   *
+   * The other half of a camera step, and a genuinely different kind of step. A
+   * `cameraConfigId` step counts repetitions of a movement; a `poseRuleId` step
+   * checks whether a held shape is being kept and how long it has been kept. The
+   * two are mutually exclusive on one step, and neither is required: a plain timer
+   * step has neither and uses no camera at all.
+   *
+   * DELIBERATELY NO `holdSeconds` FIELD HERE.
+   * How long a pose must be held belongs to the pose, not to the step that happens
+   * to mention it. Putting it on the step would give one hold two places to be
+   * configured, and the failure mode is not a crash but a quiet disagreement -
+   * the HUD counting to 30 while the record says 15 - which is exactly the class of
+   * bug the timer-phase fix (19087ef) was made to remove. `seconds` remains the
+   * step's own wall-clock budget and is set longer than the pose's hold, so there
+   * is room to settle into the pose before the step's clock runs out.
+   */
+  poseRuleId?: YogaPoseRuleId;
   /**
    * Only meaningful alongside `cameraConfigId`, and only for meditation.
    *

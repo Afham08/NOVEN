@@ -1,4 +1,5 @@
 import { defineGuidedActivity, type GuidedActivity } from './types';
+import { YOGA_POSE_RULES } from './yoga-poses';
 
 /**
  * Yoga routines: a short sequence of positions, each held for a stated time.
@@ -152,5 +153,73 @@ export const yogaRoutines: readonly GuidedActivity[] = [
     ],
     safetyNote:
       'Use a sturdy chair without wheels and keep it against a wall. Stand only if it feels safe, and sit back down straight away if you feel unsteady.',
+  }),
+
+  /*
+   * The first routine made of POSE STEPS rather than movement steps.
+   *
+   * The three above are counted repetitions and can be done sitting down. These
+   * three poses are held still, and the camera is checking the shape rather than
+   * counting anything - which is why each step here carries a `poseRuleId` and not
+   * a `cameraConfigId`. Nothing about the existing routines changes; this is a
+   * fourth one alongside them.
+   *
+   * Each pose step's `guidance` is the RULE'S OWN sentence, taken straight from
+   * `YOGA_POSE_RULES` rather than retyped. Two poses here have to be done from a
+   * particular direction for the camera to measure them honestly, and that
+   * instruction lives with the rule that depends on it. A copy in this file would be
+   * free to drift away from the rule without anything failing - which would leave
+   * the person being judged from an angle nobody told them about.
+   *
+   * `seconds` on a pose step is deliberately LONGER than the pose's own hold. The
+   * hold only starts once the shape has been steady for a moment, and it restarts
+   * from zero if the pose is broken, so a step whose clock equalled the hold would
+   * run out while the person was still finding the position. The extra time is
+   * room to settle in, not a second hold.
+   *
+   * AND THESE ARE STANDING POSES, which is a real change from the seated
+   * routines above. The summary and the safety note both say so plainly rather
+   * than letting a person who has only ever done the seated routines find out from
+   * the middle of a squat.
+   */
+  defineGuidedActivity({
+    id: 'standing-pose-holds',
+    kind: 'yoga',
+    name: 'Standing Pose Holds',
+    summary: 'Three standing poses held still, with the camera watching your position',
+    progressNoun: 'poses',
+    steps: [
+      {
+        seconds: 30,
+        title: 'Settle',
+        guidance:
+          'Stand up and place a sturdy chair behind you or beside you, so you can hold it if you need to.',
+      },
+      {
+        seconds: 35,
+        title: 'Mountain Pose',
+        guidance: YOGA_POSE_RULES.mountain.guidance,
+        poseRuleId: 'mountain',
+      },
+      {
+        seconds: 30,
+        title: 'Chair Pose',
+        guidance: YOGA_POSE_RULES.chair.guidance,
+        poseRuleId: 'chair',
+      },
+      {
+        seconds: 35,
+        title: 'Warrior II',
+        guidance: YOGA_POSE_RULES['warrior-ii'].guidance,
+        poseRuleId: 'warrior-ii',
+      },
+      {
+        seconds: 30,
+        title: 'Rest',
+        guidance: 'Come back to standing and shake out your arms. Breathe slowly a few times.',
+      },
+    ],
+    safetyNote:
+      'These poses are done standing. Do this routine only if standing feels safe today, keep a chair or wall within reach, and sit down or stop if you feel unsteady, tired or unwell. The camera checks the position only - it cannot see your balance or tell you whether a pose is right for you.',
   }),
 ];

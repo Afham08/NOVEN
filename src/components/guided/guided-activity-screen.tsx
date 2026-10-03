@@ -15,6 +15,8 @@ import {
   type MeditationGuidance,
 } from '@/activities/meditation-guidance';
 import type { GuidedActivity } from '@/activities/types';
+import { getYogaPoseRule, type YogaPoseRule } from '@/activities/yoga-poses';
+import { YogaHoldTracker, type YogaHoldSnapshot } from '@/activities/yoga-hold';
 import type { SaveStatus } from '@/activities/result-params';
 import { buildSessionMetrics } from '@/exercise/metrics';
 import { createSessionId, createSessionRecord } from '@/exercise/session-store';
@@ -135,8 +137,22 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
     ? getGuidedPoseConfig(snapshot.currentStep.cameraConfigId)
     : undefined;
 
-  /** Whether we're currently on a camera-tracked step. */
-  const isCameraStep = currentStepConfig !== undefined;
+  /**
+   * Current step's static pose rule, if any.
+   *
+   * The third kind of camera step. A `cameraConfigId` counts repetitions and a
+   * `poseRuleId` checks a held shape, so a step carrying one of those is a camera
+   * step in the same sense as the other - it needs the camera, it shows the
+   * preview, and it asks for permission - while being answered by an entirely
+   * different mechanism underneath.
+   */
+  const currentPoseRule = getYogaPoseRule(snapshot.currentStep?.poseRuleId);
+
+  /** Whether we're currently on a pose-hold step rather than a counted-movement one. */
+  const isPoseStep = currentPoseRule !== undefined;
+
+  /** Whether we're currently on a camera-tracked step of either kind. */
+  const isCameraStep = currentStepConfig !== undefined || isPoseStep;
 
   /** Whether the current activity is meditation (for camera HUD customization). */
   const isMeditation = activity.kind === 'meditation';
@@ -149,10 +165,13 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
    * as "denied" and flash the no-camera placeholder at someone who is about to
    * be asked.
    *
-   * Meditation needs no engine, so it does not wait for one.
+   * Meditation and pose-hold steps need no engine, so they do not wait for one.
    */
   const showCameraPreview =
-    isCameraStep && running && hasCameraPermission === true && (isMeditation || hasCameraEngine);
+    isCameraStep &&
+    running &&
+    hasCameraPermission === true &&
+    (isMeditation || isPoseStep || hasCameraEngine);
 
   /**
    * Posture guidance for a camera step. Held in a ref because it is stateful -
@@ -167,6 +186,45 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
    * rather than as an assessment nobody has made yet.
    */
   const [postureGuidance, setPostureGuidance] = useState<MeditationGuidance | null>(null);
+
+  /**
+   * The pose-hold tracker for the current pose step.
+   *
+   * Held in a ref for the same reason the posture tracker is: it carries the run of
+   * unbroken time between frames, and a fresh instance on every render would
+   * restart that run constantly and could never bank a hold at all. It is rebuilt
+   * only when the step changes, below.
+   *
+   * One per pose step, and `null` on every other kind of step, so a pose that was
+   * being held cannot keep counting after the screen has moved past it.
+   */
+  const poseTrackerRef = useRef<YogaHoldTracker | null>(null);
+
+  /**
+   * What the pose camera HUD is showing. `null` before the first pose frame
+   * arrives, which the HUD renders as a neutral holding message rather than as an
+   * assessment nobody has made yet.
+   */
+  const [poseHold, setPoseHold] = useState<YogaHoldSnapshot | null>(null);
+
+  /**
+   * Starts each pose step from a clean slate.
+   *
+   * A different reason from the posture reset above, and worth spelling out: a
+   * hold banked against the last pose would otherwise be carried into this one, so
+   * a person could arrive at Warrior II with two-thirds of Mountain already held
+   * and finish it in a few seconds. The hold belongs to the pose that earned it.
+   */
+  useEffect(() => {
+    if (!currentPoseRule) {
+      poseTrackerRef.current = null;
+      const timer = setTimeout(() => setPoseHold(null), 0);
+      return () => clearTimeout(timer);
+    }
+    poseTrackerRef.current = new YogaHoldTracker(currentPoseRule);
+    const timer = setTimeout(() => setPoseHold(null), 0);
+    return () => clearTimeout(timer);
+  }, [currentPoseRule]);
 
   /**
    * Stable on purpose: these three are dependencies of the effects below and of
@@ -188,6 +246,13 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
 
   const pause = useCallback(() => {
     session.pause();
+    /*
+     * The hold is frozen alongside the session clock. `handlePoseFrame` already
+     * ignores frames unless the session is running, so this is belt and braces -
+     * but it means the tracker's own state can never be one frame ahead of the
+     * session the person paused.
+     */
+    poseTrackerRef.current?.pause();
     setSnapshot(session.snapshot());
     // The controller suspends itself while paused; nothing further is spoken
     // until Resume, exactly matching the exercise session's policy.
@@ -196,6 +261,7 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
 
   const resume = useCallback(() => {
     session.resume();
+    poseTrackerRef.current?.resume();
     setSnapshot(session.snapshot());
     voiceRef.current?.announceResume();
   }, [session]);
@@ -207,8 +273,14 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
    * prompt in front of somebody for a session that never uses one. Computed
    * from the activity's own steps, which never change for a mounted screen, so
    * the permission effect below does not re-run.
+   *
+   * A pose step counts as a camera user for the same reason a counted-movement
+   * step does: it watches the camera too. A routine made of pose steps asks for
+   * permission once, at the start, exactly as before.
    */
-  const usesCamera = activity.steps.some((step) => step.cameraConfigId !== undefined);
+  const usesCamera = activity.steps.some(
+    (step) => step.cameraConfigId !== undefined || step.poseRuleId !== undefined,
+  );
 
   /**
    * Request camera permission for camera-tracked steps.
@@ -251,9 +323,18 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
    * `MeditationPostureTracker` in `handlePoseFrame` instead. The camera preview
    * still appears, because that is driven by `showCameraPreview`, not by the
    * engine.
+   *
+   * POSE-HOLD STEPS GET NO ENGINE EITHER, and for the same reason with the same
+   * consequence. There is nothing to count: the person is meant to stop moving.
+   * A `SessionEngine` on a held pose would report zero reps forever and fold that
+   * zero into the session total, which is at least honest but useless, and any
+   * drift in the pose would be counted as movement nobody made. Their frames go to
+   * `YogaHoldTracker` instead. This is why the guard tests the step rather than
+   * relying on `currentStepConfig` being absent: a pose step has no config at all,
+   * and the condition says what it means rather than relying on that coincidence.
    */
   useEffect(() => {
-    if (isCameraStep && currentStepConfig && !isMeditation) {
+    if (isCameraStep && currentStepConfig && !isMeditation && !isPoseStep) {
       cameraEngineRef.current = new SessionEngine(currentStepConfig);
       // The new engine counts from zero, so its readings are all new
       // repetitions: the previous step's contribution stays in the total, but
@@ -270,7 +351,7 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
         setHasCameraEngine(false);
       }, 0);
     }
-  }, [isCameraStep, currentStepConfig, isMeditation]);
+  }, [isCameraStep, currentStepConfig, isMeditation, isPoseStep]);
 
   /**
    * Starts each camera step from a clean slate.
@@ -291,16 +372,24 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
   /**
    * Handle pose frames from the camera for the current camera-tracked step.
    *
-   * Two different consumers of the same frame, chosen by what the step is:
+   * Three different consumers of the same frame, chosen by what the step is:
    *
    * - Yoga runs a `SessionEngine`, because a pose has repetitions to count and
    *   the engine is what makes that counting honest.
    * - Meditation runs `MeditationPostureTracker`, which measures one torso
    *   angle and reports it. No reps, no range, no tally.
+   * - A pose step runs `YogaHoldTracker`, which measures whether the shape is being
+   *   kept and for how long. No reps either: there is nothing in a held pose to
+   *   count, and the tally is left alone rather than fed a zero that would look
+   *   like a measurement.
    *
-   * Presence comes from the frame payload, so a person who has walked out of
-   * shot is reported as out of frame on the first frame after they go, rather
-   * than being carried along by whatever the last good posture was.
+   * Presence and the frame timestamp come from the payload, so a person who has
+   * walked out of shot is reported as out of frame on the first frame after they
+   * go, rather than being carried along by whatever the last good reading was.
+   *
+   * The hold's own frame timestamp is handed straight to the tracker rather than
+   * the device clock. It is the MediaPipe stream's timeline, and it is the only
+   * clock that is honest about when this particular frame was captured.
    */
   const handlePoseFrame = useCallback(
     (event: { nativeEvent: PoseFrameEventPayload }) => {
@@ -321,6 +410,32 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
         return;
       }
 
+      const poseTracker = poseTrackerRef.current;
+      if (poseTracker) {
+        const hold = poseTracker.advance(presence, landmarks, timestampMs);
+        setPoseHold(hold);
+        /*
+         * The correction is spoken once per genuine change, through the same
+         * controller the rest of the app uses and with no new feedback kind: the
+         * tracker's state changes on the frame the pose is fixed or broken, and
+         * that is the only thing worth a sentence. Silence between them is what
+         * keeps this from nagging somebody for holding a pose.
+         */
+        if (hold.justCompleted) {
+          voiceRef.current?.consider('good', `${currentPoseRule?.name ?? 'Pose'} held. Well done.`);
+        } else if (hold.state === 'invalid' && hold.correction) {
+          /*
+           * `positioning`, not a new kind: it is the existing meaning "visible, but
+           * not yet in the right posture", which is exactly what a broken pose is.
+           * Inventing a `FeedbackKind` for held poses would give the voice layer a
+           * second way of saying the same thing and a second thing to keep in step
+           * with this screen.
+           */
+          voiceRef.current?.consider('positioning', hold.correction);
+        }
+        return;
+      }
+
       const engine = cameraEngineRef.current;
       if (!engine) return;
       const result = engine.handlePoseFrame(event);
@@ -333,7 +448,7 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
       // state machine speaks only on genuine changes, never per frame.
       voiceRef.current?.onFrame(result);
     },
-    [snapshot.phase, snapshot.currentStep, isMeditation],
+    [snapshot.phase, snapshot.currentStep, isMeditation, currentPoseRule],
   );
 
   /**
@@ -574,7 +689,34 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
             onPoseFrame={handlePoseFrame}
           />
           <View style={styles.cameraHudOverlay}>
-            {isMeditation ? (
+            {isPoseStep ? (
+              <View style={[styles.posturePanel, { backgroundColor: posePanelColor(theme, poseHold) }]}>
+                <Text style={styles.posturePanelLabel}>
+                  {posePanelName(currentPoseRule).toUpperCase()}
+                </Text>
+                {/*
+                  The number is held seconds against the seconds the pose asks for,
+                  read from the tracker rather than from the step's clock. They are
+                  different measurements and conflating them would be the one lie this
+                  HUD could tell: the step's clock keeps running while the pose is
+                  broken, and showing that as "held" would credit time nobody spent in
+                  position.
+                */}
+                <Text style={styles.posturePanelText}>
+                  Held {formatHeldSeconds(poseHold?.holdSeconds)} of {poseHold?.requiredSeconds ?? 0}{' '}
+                  seconds
+                </Text>
+                {/*
+                  The correction from the failing check, when there is one. Absent
+                  rather than blank when the pose is right, so a settled pose shows
+                  nothing but its number.
+                */}
+                {poseHold?.correction ? (
+                  <Text style={styles.posePanelCorrection}>{poseHold.correction}</Text>
+                ) : null}
+                <Text style={styles.posturePanelLabel}>{poseHoldLine(poseHold)}</Text>
+              </View>
+            ) : isMeditation ? (
               <View
                 style={[
                   styles.posturePanel,
@@ -753,6 +895,22 @@ function secondsLabel(totalSeconds: number): string {
 }
 
 /**
+ * Held seconds, to one decimal place.
+ *
+ * One place because the raw value ticks by ~33ms per frame and rounding to whole
+ * seconds would show the same number for about thirty frames and then jump by one,
+ * which reads as a stutter rather than as time passing. One decimal is the finest
+ * granularity that is still a number a person can follow.
+ *
+ * Never negative, and never NaN: the tracker already floors the banked time at
+ * zero, and a NaN reaching a `<Text>` renders as "NaN" on somebody's screen.
+ */
+function formatHeldSeconds(heldSeconds: number | undefined): string {
+  if (heldSeconds === undefined || !Number.isFinite(heldSeconds)) return '0.0';
+  return Math.max(0, heldSeconds).toFixed(1);
+}
+
+/**
  * Backdrop tint for the meditation posture panel.
  *
  * Reassurance is tinted with the brand's sage and everything else with the
@@ -778,6 +936,64 @@ function posturePanelColor(
   const settled = guidance?.upright === true || guidance?.state === 'settled';
   const base = settled ? theme.accentSecondary : theme.surfaceInverse;
   return `${base}D9`;
+}
+
+/**
+ * The one line under the pose counter.
+ *
+ * Each state gets its own sentence rather than a generic "hold", because the four
+ * of them ask different things of the person: get seen, get into the pose, keep it,
+ * or notice it worked. `not-tracked` deliberately says the camera has lost them
+ * rather than blaming the pose, because the shape on screen may well still be
+ * perfect - it simply cannot be checked, and claiming otherwise would be the app
+ * talking about something it cannot see.
+ *
+ * "Not in the pose yet" rather than "hold" for the invalid case: the person has
+ * already been told what to fix by the correction above, and a second line telling
+ * them to hold would contradict it.
+ */
+function poseHoldLine(hold: YogaHoldSnapshot | null): string {
+  if (!hold) return 'Camera starting up';
+  switch (hold.state) {
+    case 'not-tracked':
+      return 'Camera cannot see you properly';
+    case 'invalid':
+      return 'Not in the pose yet';
+    case 'not-ready':
+      return 'Hold still for a moment';
+    case 'valid':
+      return 'Good position. Keep holding';
+    case 'completed':
+      return 'Held. Well done';
+    default:
+      /* Unreachable: every state in the union is handled above. */
+      return '';
+  }
+}
+
+/**
+ * Panel colour for the pose HUD.
+ *
+ * The accent appears only once the pose is genuinely being held, so the colour
+ * change is the reward and not a decoration. `not-tracked` is tinted with the accent
+ * too - it is a state to act on, and it should not look like a fault the person did.
+ */
+function posePanelColor(theme: PosturePanelColors, hold: YogaHoldSnapshot | null): string {
+  const base =
+    hold?.state === 'valid' || hold?.state === 'completed' || hold?.state === 'not-tracked'
+      ? theme.accentSecondary
+      : theme.surfaceInverse;
+  return `${base}D9`;
+}
+
+/**
+ * The pose name for the HUD, from the step's own rule.
+ *
+ * The fallback exists so a rule removed later degrades to the neutral word rather
+ * than rendering an empty label over the camera.
+ */
+function posePanelName(rule: YogaPoseRule | undefined): string {
+  return rule?.name ?? 'Pose';
 }
 
 const styles = StyleSheet.create({
@@ -1005,6 +1221,13 @@ const styles = StyleSheet.create({
     ...Type.bodyEmphasis,
     fontSize: 22,
     lineHeight: 30,
+    color: '#FAF9F6',
+    textAlign: 'center',
+  },
+  posePanelCorrection: {
+    ...Type.bodyEmphasis,
+    fontSize: 19,
+    lineHeight: 26,
     color: '#FAF9F6',
     textAlign: 'center',
   },

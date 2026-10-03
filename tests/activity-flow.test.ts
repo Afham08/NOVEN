@@ -191,10 +191,18 @@ export function run(): void {
       'the screen recognises a meditation by its kind',
       code.includes("const isMeditation = activity.kind === 'meditation'"),
     );
-    check(
-      'the preview does not wait for an engine meditation never builds',
-      code.includes('isMeditation || hasCameraEngine'),
-    );
+check(
+        /*
+         * Updated when pose-hold steps were added. Meditation and a pose step both
+         * run WITHOUT a SessionEngine by design - one has no repetition to count
+         * and the other has nothing to count at all - so the preview must not wait
+         * for an engine that will never arrive, for either of them. Asserted as the
+         * whole disjunction rather than one pair of terms so that removing any one
+         * of them fails here.
+         */
+        'the preview does not wait for an engine meditation never builds',
+        code.includes('isMeditation || isPoseStep || hasCameraEngine'),
+      );
     check(
       'no session engine is built for a meditation camera step',
       code.includes('isCameraStep && currentStepConfig && !isMeditation'),
