@@ -47,6 +47,17 @@ export type GuidedSnapshot = {
   currentStep: GuidedStep | null;
   /** Seconds into the current step. */
   stepElapsedSeconds: number;
+  /**
+   * Milliseconds into the current step, at the precision the clock actually has.
+   *
+   * Exposed because something inside a step needs sub-second accuracy and must not
+   * therefore keep a second clock of its own. A breathing phase is four seconds
+   * long, and seeding its engine from `stepElapsedSeconds` would start it up to a
+   * whole second late - which is a quarter of the phase. Reading this instead means
+   * the breathing and the step that contains it are two views of ONE clock, so they
+   * cannot drift apart.
+   */
+  stepElapsedMs: number;
   /** Steps fully finished. Equals the step count once the activity is finished. */
   stepsCompleted: number;
   /** True once every step has run out. */
@@ -197,7 +208,8 @@ export class GuidedSession {
     const stepOffsetMs = this.steps
       .slice(0, stepIndex)
       .reduce((total, step) => total + Math.max(0, Math.floor(step.seconds)) * MS_PER_SECOND, 0);
-    const stepElapsedSeconds = Math.max(0, Math.floor((elapsedMs - stepOffsetMs) / MS_PER_SECOND));
+    const stepElapsedMs = Math.max(0, elapsedMs - stepOffsetMs);
+    const stepElapsedSeconds = Math.floor(stepElapsedMs / MS_PER_SECOND);
 
     const finished = this.phase === 'finished';
     const currentStepSeconds = Math.max(
@@ -215,6 +227,7 @@ export class GuidedSession {
       stepIndex,
       currentStep: this.steps[stepIndex] ?? null,
       stepElapsedSeconds,
+      stepElapsedMs,
       stepsCompleted,
       finished,
       stepProgress:

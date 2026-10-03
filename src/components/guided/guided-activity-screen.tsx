@@ -8,6 +8,13 @@ import {
 } from '../../../modules/pose-tracker';
 
 import { describeLength, describeStepPosition } from '@/activities/activity-format';
+import {
+  BreathCycleEngine,
+  getBreathingTechnique,
+  nextBreathAnnouncement,
+  type BreathCycleSnapshot,
+  type BreathPhaseId,
+} from '@/activities/breath-cycle';
 import { GuidedSession, type GuidedSnapshot } from '@/activities/guided-session';
 import { beginStep, emptyRepTally, measuredReps, observeStepReps, type GuidedRepTally } from '@/activities/guided-reps';
 import {
@@ -33,6 +40,20 @@ import { SectionHeader } from '@/components/ui/section-header';
 import { StatusChip } from '@/components/ui/status-chip';
 import { Radius, Spacing, Type } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+
+/** How often the session clock is read while an ordinary step is running. */
+const SESSION_TICK_MS = 1000;
+
+/**
+ * How often it is read while a breathing step is running.
+ *
+ * A breathing phase is four seconds, so the phase has to be noticed on the way past
+ * rather than only once a second or the person is told to hold a moment after they
+ * should already have let go. Four readings a second is enough to keep the phase
+ * and the countdown honest without rendering the whole screen four times as often
+ * for no reason.
+ */
+const BREATH_TICK_MS = 250;
 
 /**
  * ============================================================================
@@ -148,6 +169,20 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
    */
   const currentPoseRule = getYogaPoseRule(snapshot.currentStep?.poseRuleId);
 
+  /**
+   * Current step's breathing technique, if any.
+   *
+   * The only kind of step that uses no camera at all. A `cameraConfigId` counts
+   * repetitions, a `poseRuleId` checks a held shape, and this paces a breath
+   * through a repeating sequence of phases. It is resolved here, beside the other
+   * two, so the three kinds of step are visible side by side: the screen asks
+   * "which kind of step is this?" in exactly one place.
+   */
+  const currentTechnique = getBreathingTechnique(snapshot.currentStep?.breathingTechniqueId);
+
+  /** Whether we're on a paced-breathing step rather than any other kind. */
+  const isBreathingStep = currentTechnique !== undefined;
+
   /** Whether we're currently on a pose-hold step rather than a counted-movement one. */
   const isPoseStep = currentPoseRule !== undefined;
 
@@ -220,6 +255,40 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
   const announcedCorrectionRef = useRef<string | null>(null);
 
   /**
+   * The breathing guide for the current breathing step.
+   *
+   * Held in a ref for the same reason the pose tracker is: it carries the elapsed
+   * time and the cycle count across renders, and a fresh instance per render would
+   * restart the breath on every tick.
+   *
+   * It shares the app's clock with `GuidedSession` - both default to `Date.now` -
+   * and it is seeded from `snapshot.stepElapsedMs` rather than from the moment the
+   * screen noticed the step changed, because by then the step is already that far
+   * in. That is the whole of how the two stay in agreement: there is one clock, and
+   * the breathing is a projection of the step that contains it rather than a second
+   * timeline that has to be kept in step by hand.
+   */
+  const breathRef = useRef<BreathCycleEngine | null>(null);
+
+  /** What the breathing panel is currently showing. Null off a breathing step. */
+  const [breath, setBreath] = useState<BreathCycleSnapshot | null>(null);
+
+  /**
+   * The phase the voice has already announced, so each one is said once.
+   *
+   * The same once-only rule `announcedStepRef` and `announcedCorrectionRef` apply,
+   * and for the same reason: `consider` with an override text is the one-shot path
+   * and speaks every time it is called. Here the caller is a timer that fires
+   * several times a second, so without this guard a four-second inhale would be
+   * announced hundreds of times.
+   *
+   * Keyed on the phase ID rather than the label, because the two holds share the
+   * label "Hold" and differ only in their id: a label-keyed guard would swallow the
+   * second hold entirely.
+   */
+  const announcedBreathPhaseRef = useRef<BreathPhaseId | null>(null);
+
+  /**
    * What the pose camera HUD is showing. `null` before the first pose frame
    * arrives, which the HUD renders as a neutral holding message rather than as an
    * assessment nobody has made yet.
@@ -246,6 +315,82 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
     const timer = setTimeout(() => setPoseHold(null), 0);
     return () => clearTimeout(timer);
   }, [currentPoseRule]);
+
+  /**
+   * A breathing guide per breathing step, started as of the step's own start.
+   *
+   * `stepElapsedMs` is the session's own reading of how far into this step the
+   * clock already is. Passing it as the guide's start time is what keeps the two in
+   * step: without it the breath would begin at the moment the screen noticed the
+   * step changed, which on a one-second timer is up to a second late - a quarter of
+   * a four-second phase.
+   *
+   * It is started here ONLY if the session is already running, and that is read live
+   * off the stable `session` rather than off the render, because a guide started
+   * before anybody pressed start would be breathing into a screen that had not begun
+   * - the case of a breathing step that is also the first step of an activity. That
+   * guide is left `ready` here and started by the lifecycle effect below, which is
+   * also the only thing that knows when the session starts.
+   */
+  useEffect(() => {
+    if (!currentTechnique) {
+      breathRef.current = null;
+      announcedBreathPhaseRef.current = null;
+      const timer = setTimeout(() => setBreath(null), 0);
+      return () => clearTimeout(timer);
+    }
+    const engine = new BreathCycleEngine(currentTechnique);
+    breathRef.current = engine;
+    announcedBreathPhaseRef.current = null;
+    if (session.snapshot().phase === 'running') {
+      engine.start(Date.now() - session.snapshot().stepElapsedMs);
+    }
+    /*
+     * Nothing is published to state from here. The lifecycle effect below runs
+     * immediately afterwards, in this same commit, and it is the one place the
+     * reading is pushed out - so the panel is filled by the same code whether the
+     * guide has just been created or has just been paused.
+     */
+    return () => {
+      // The step is over one way or another, so the breath is finished with it.
+      // Freezing it here rather than dropping it means the last thing shown is the
+      // phase the person was actually in.
+      engine.complete();
+    };
+  }, [currentTechnique, session]);
+
+  /**
+   * Keeps the guide in step with the session's own lifecycle.
+   *
+   * The session is the authority on whether the meditation is running, and the
+   * breath follows it rather than keeping its own opinion: paused means the phase
+   * is frozen mid-breath, finished means the guide is done. The time spent paused
+   * belongs to neither side of it, which is exactly what `BreathCycleEngine.pause`
+   * does - so resuming continues the same phase instead of skipping ahead by however
+   * long the interruption lasted.
+   */
+  useEffect(() => {
+    const engine = breathRef.current;
+    if (!engine) return;
+    if (snapshot.finished) {
+      engine.complete();
+    } else if (running) {
+      /*
+       * `ready` is the guide the create effect left behind because the session was
+       * not running yet. Its step cannot be part-way through - a session that has
+       * not started is at zero, and a paused one cannot change step - so starting on
+       * the instant it is told to is starting on time, and no seed is needed.
+       */
+      if (engine.snapshot().phase === 'ready') engine.start();
+      else engine.resume();
+    } else {
+      engine.pause();
+    }
+    setBreath(engine.snapshot());
+    // `snapshot.stepIndex` is included so arriving on a breathing step while the
+    // session is already running starts the guide. The guide itself is in a ref,
+    // which is stable and so is not a dependency.
+  }, [running, snapshot.finished, snapshot.stepIndex, currentTechnique]);
 
   /**
    * Stable on purpose: these three are dependencies of the effects below and of
@@ -604,14 +749,29 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
    * screen stops asking, so nothing re-renders behind the user's back, and when
    * the session finishes on its own the next reading notices and the effect
    * tears the interval down.
+   *
+   * It is the SAME interval that paces the breath, not a second one. Two timers on
+   * one screen is two things that can disagree about what time it is, and the only
+   * thing this one changes is how often it asks. A breathing step asks four times
+   * as often, because its phases are four seconds long: at one reading a second a
+   * four-second phase is announced up to a second late and the countdown underneath
+   * it visibly stutters. Everything else runs at the original pace.
+   *
+   * `session.snapshot()` is a pure read of the clock, so reading it more often
+   * cannot make the session run faster - it is the interval's length being changed,
+   * never the arithmetic underneath it.
    */
   useEffect(() => {
     if (!running) return;
-    const tick = () => setSnapshot(session.snapshot());
+    const tick = () => {
+      setSnapshot(session.snapshot());
+      const engine = breathRef.current;
+      if (engine) setBreath(engine.snapshot());
+    };
     tick();
-    const interval = setInterval(tick, 1000);
+    const interval = setInterval(tick, isBreathingStep ? BREATH_TICK_MS : SESSION_TICK_MS);
     return () => clearInterval(interval);
-  }, [running, session]);
+  }, [running, session, isBreathingStep]);
 
   /**
    * A session that runs all the way to the end finishes by itself. Saving is
@@ -648,6 +808,43 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
     // one sentence per step, never repeated while the step lasts.
     voiceRef.current?.consider('ready', step.guidance);
   }, [running, snapshot.currentStep, snapshot.stepIndex]);
+
+  /**
+   * The breathing voice guide: one word when the phase changes, and nothing else.
+   *
+   * This is the fourth caller of the one-shot `consider` path and the fourth place
+   * the once-only rule has to be enforced by the caller, because `consider` with an
+   * override text is deliberately exempt from the controller's state-change rules.
+   * The phase can be the same across hundreds of ticks, so without
+   * `announcedBreathPhaseRef` a single four-second inhale would be spoken two
+   * hundred times.
+   *
+   * Keyed on the phase ID, not the label, because both holds are labelled "Hold" and
+   * only their ids differ - a label-keyed guard would let the second hold through
+   * never being spoken at all, which is the quieter of the two failure modes but
+   * still wrong.
+   *
+   * It rides on `breath`, which is only produced by the tick while the session is
+   * running, so a pause stops the announcements without anything extra here: the
+   * breath freezes, the phase stops changing, and no further word is spoken. The
+   * ref is cleared by the create effect when the step changes, so the first phase of
+   * a new step is announced even when it is the same phase the last one ended on.
+   */
+  useEffect(() => {
+    const phaseId = nextBreathAnnouncement(
+      announcedBreathPhaseRef.current,
+      breath?.phaseId ?? null,
+    );
+    if (!running || phaseId === null) return;
+    announcedBreathPhaseRef.current = phaseId;
+    /*
+     * The phase's own word from the technique, and nothing else. Deliberately not a
+     * sentence about the person: the guide knows when the phase is due and has no
+     * way of knowing whether it was followed, so it cannot say "good" or "keep
+     * going" or anything else that would imply it had checked.
+     */
+    voiceRef.current?.consider('ready', breath?.label ?? '');
+  }, [running, breath]);
 
   /**
    * Starting again after a finished session has to re-arm the once-only guard,
@@ -818,6 +1015,57 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
             </Text>
           ) : null}
         </Card>
+      )}
+
+      {/*
+        The breathing guide.
+
+        The one panel in the app that is not showing a measurement, and it is built
+        to look like it: it shows what is DUE, not what was detected. There is no
+        verdict here, no tick for having done it right, and nothing that changes
+        because of anything the camera or the person did.
+
+        It sits in the body, directly under the step it belongs to, rather than in
+        the camera preview slot above. A breathing step has no camera at all, so
+        anything inside that slot would never render - and if it did render beside a
+        posture panel it would put two different measurements under one breath.
+      */}
+      {isBreathingStep && breath !== null && breath.phaseId !== null && (
+        <View style={[styles.breathBlock, { backgroundColor: theme.backgroundElement }]}>
+          <Text style={[styles.breathLabel, { color: theme.textSecondary }]}>
+            {breath.techniqueName.toUpperCase()}
+          </Text>
+          {/*
+            The phase and its remaining seconds, the largest thing on the screen
+            after the session clock, because during a breath the phase is what the
+            person is actually being asked to do.
+          */}
+          <Text style={[styles.breathPhase, { color: theme.heading }]}>{breath.label}</Text>
+          <Text
+            accessibilityLabel={`${breath.label}, ${breath.phaseRemainingSeconds} ${
+              breath.phaseRemainingSeconds === 1 ? 'second' : 'seconds'
+            } left`}
+            style={[styles.breathCount, { color: theme.textSecondary }]}>
+            {breath.phaseRemainingSeconds}
+          </Text>
+          <View style={[styles.track, { backgroundColor: theme.backgroundSelected }]}>
+            <View
+              style={[
+                styles.fill,
+                { backgroundColor: theme.accentSecondary, width: `${breath.phaseProgress * 100}%` },
+              ]}
+            />
+          </View>
+          {/*
+            Whole cycles, and only whole ones. A step that ends part-way through a
+            cycle must not report a fraction of one, and the number is never derived
+            from the phase list being nearly finished - it is the count of boundaries
+            actually crossed.
+          */}
+          <Text style={[styles.breathCycles, { color: theme.textSecondary }]}>
+            {breath.completedCycles} {breath.completedCycles === 1 ? 'cycle' : 'cycles'}
+          </Text>
+        </View>
       )}
 
       <SectionHeader accent title="What you will do" />
@@ -1066,6 +1314,45 @@ const styles = StyleSheet.create({
   fill: {
     height: '100%',
     borderRadius: Radius.pill,
+  },
+  /*
+   * The breathing guide's block. Reuses the same padding, radius and label scale as
+   * the cards below it rather than inventing a look of its own: a person halfway
+   * through a five-minute meditation should not have been handed a different app.
+   */
+  breathBlock: {
+    alignItems: 'center',
+    gap: Spacing.two,
+    padding: Spacing.four,
+    borderRadius: Radius.card,
+  },
+  breathLabel: {
+    ...Type.label,
+    fontSize: 13,
+    lineHeight: 18,
+    letterSpacing: 0.8,
+  },
+  breathPhase: {
+    ...Type.headingLarge,
+    fontSize: 44,
+    lineHeight: 52,
+    fontWeight: '700',
+  },
+  /*
+   * Tabular figures, like the session clock: the number counts down, and a
+   * proportional digit would make it visibly jump sideways as it changed.
+   */
+  breathCount: {
+    ...Type.bodyEmphasis,
+    fontSize: 26,
+    lineHeight: 32,
+    fontVariant: ['tabular-nums'],
+  },
+  breathCycles: {
+    ...Type.label,
+    fontSize: 14,
+    lineHeight: 20,
+    letterSpacing: 0.8,
   },
   stepPosition: {
     ...Type.label,

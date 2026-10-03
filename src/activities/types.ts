@@ -3,6 +3,7 @@
 // imports throughout.
 import type { SessionKind } from '../exercise/session-store';
 
+import type { BreathingTechniqueId } from './breath-cycle';
 import type { MeditationPostureExpectation } from './meditation-guidance';
 import type { YogaPoseRuleId } from './yoga-poses';
 
@@ -68,6 +69,26 @@ export type GuidedStep = {
    * is room to settle into the pose before the step's clock runs out.
    */
   poseRuleId?: YogaPoseRuleId;
+  /**
+   * Optional id of a breathing technique from breath-cycle.ts.
+   *
+   * A third kind of step, and the only one with no camera at all. A
+   * `cameraConfigId` step counts repetitions of a movement, a `poseRuleId` step
+   * checks a shape somebody is holding, and this one paces the breath through a
+   * repeated sequence of phases - inhale, hold, exhale - for as long as the step
+   * lasts.
+   *
+   * IT MEANS "WHEN", NEVER "WHETHER". The camera sees a torso and the app has no
+   * microphone here, so a breathing step cannot know what the person did and this
+   * field asks for nothing of the sort. It is mutually exclusive with the other two
+   * on one step, because a step that counted movements and paced a breath at the
+   * same time would be claiming two different measurements from one frame.
+   *
+   * Like `poseRuleId`, this names a technique and nothing else: the phases and
+   * their lengths belong to the technique, so there is one place to change a
+   * pattern rather than one per step that mentions it.
+   */
+  breathingTechniqueId?: BreathingTechniqueId;
   /**
    * Only meaningful alongside `cameraConfigId`, and only for meditation.
    *
