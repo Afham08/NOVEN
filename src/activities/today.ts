@@ -40,11 +40,12 @@ export type TodayActivityStatus = {
 /**
  * Did this session actually finish its activity?
  *
- * The session screen records how many steps ran, and GuidedSession computes that
- * from elapsed time on purpose - its own comment explains that deriving it from
- * "finished" would credit a five-second tap with a whole meditation. So the
- * record already carries the truth, and reading only the record's kind and date
- * would tick off a routine somebody abandoned halfway.
+ * The session screen records how many steps really completed, and GuidedSession
+ * credits a step only when something happened - the step's own clock ran out, or a
+ * hold was met, or a repetition count reached its target. So a person who spent
+ * five seconds of a one-minute meditation is recorded as having done none of its
+ * stages, and reading only the record's kind and date would tick off a routine
+ * somebody abandoned halfway.
  *
  * A record with no step count predates the field being written, so there is
  * nothing to judge it against and it keeps the behaviour it always had. An

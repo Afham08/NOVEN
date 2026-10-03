@@ -730,6 +730,19 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
         if (hold.justCompleted) {
           announcedCorrectionRef.current = null;
           voiceRef.current?.consider('good', `${currentPoseRule?.name ?? 'Pose'} held. Well done.`);
+          /*
+           * The hold being met is what finishes this step, so this frame is the one
+           * that tells the session so. `completeStep` reports whether THIS call was
+           * the one that completed it, and the screen is re-read only then - a
+           * snapshot per camera frame would re-render the whole screen thirty times
+           * a second to learn nothing.
+           *
+           * Passing the index rather than asking the session to take its word for
+           * which step this is: a frame that arrives after the screen has already
+           * moved on must not be able to complete whatever step is under way by
+           * then. The session refuses any index that is not the current one.
+           */
+          if (session.completeStep(snapshot.stepIndex)) setSnapshot(session.snapshot());
         } else if (hold.state === 'invalid' && hold.correction) {
           /*
            * `positioning`, not a new kind: it is the existing meaning "visible, but
@@ -755,13 +768,21 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
       // Fold the engine's own count in before rendering, so the HUD number and
       // the persisted number come from the same measurement.
       repTallyRef.current = observeStepReps(repTallyRef.current, result.reps);
+      /*
+       * And tell the session what was counted, so a step that declares a target is
+       * finished by reaching it rather than by its clock running out. Nothing in the
+       * catalogue declares one today, so this is inert for every existing routine
+       * and the counting above is unaffected either way - it is here so that adding
+       * a real target later needs no wiring in this file.
+       */
+      if (session.reportStepReps(result.reps)) setSnapshot(session.snapshot());
       setCameraHud(result);
       // The voice layer reads the engine's own decision — the same object the
       // HUD renders — so the speaker can never disagree with the screen. Its
       // state machine speaks only on genuine changes, never per frame.
       voiceRef.current?.onFrame(result);
     },
-    [snapshot.phase, snapshot.currentStep, isMeditation, currentPoseRule],
+    [snapshot.phase, snapshot.stepIndex, snapshot.currentStep, isMeditation, currentPoseRule, session],
   );
 
   /**

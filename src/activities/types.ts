@@ -66,7 +66,10 @@ export type GuidedStep = {
    * the HUD counting to 30 while the record says 15 - which is exactly the class of
    * bug the timer-phase fix (19087ef) was made to remove. `seconds` remains the
    * step's own wall-clock budget and is set longer than the pose's hold, so there
-   * is room to settle into the pose before the step's clock runs out.
+   * is room to settle into the pose before the step's clock runs out. Holding the
+   * shape for its full length completes the step and moves on early; letting the
+   * budget run out without ever holding it ends the activity with the step
+   * uncounted, because a timeout is not evidence that anybody held anything.
    */
   poseRuleId?: YogaPoseRuleId;
   /**
@@ -101,7 +104,48 @@ export type GuidedStep = {
    * of the two.
    */
   postureExpectation?: MeditationPostureExpectation;
+  /**
+   * How many repetitions of the step's movement finish it.
+   *
+   * A step that carries one is answered by the camera rather than by the clock:
+   * `GuidedSession` credits it the moment the count reaches this, and not before.
+   * That is the whole reason the field exists - a step whose completion condition
+   * is a measurement must never be satisfied by a timeout, or the record would say
+   * somebody did eight repetitions when the app counted none.
+   *
+   * OPTIONAL, AND NO ACTIVITY DECLARES ONE TODAY. Every counted-movement step in
+   * the catalogue is currently a timed budget instead, so nothing about any
+   * existing routine changes. It is here so that a routine can state its own real
+   * target when one is known, and so the completion path is exercised by tests
+   * rather than first being used by somebody on a device.
+   *
+   * Only meaningful alongside `cameraConfigId`: there is nothing to count without
+   * a config to count it against.
+   */
+  targetReps?: number;
 };
+
+/**
+ * What actually finishes a step, and therefore who is allowed to say it did.
+ *
+ * The three kinds are already distinguishable from the step itself, so this is one
+ * function rather than three checks scattered through the session: the session
+ * settles a TIMED step from its own clock, and refuses to settle a HOLD or a REPS
+ * step from a clock at all, because only the tracker that watched the person can
+ * say those finished.
+ *
+ * The order matters. A `poseRuleId` names a shape somebody holds and
+ * `targetReps` names a count, and a step carrying both would be asking for two
+ * different measurements from one camera frame - so the pose wins and the
+ * repetition target is ignored rather than the step quietly claiming both.
+ */
+export type GuidedStepCompletion = 'timed' | 'hold' | 'reps';
+
+export function guidedStepCompletion(step: GuidedStep): GuidedStepCompletion {
+  if (step.poseRuleId !== undefined) return 'hold';
+  if (step.targetReps !== undefined) return 'reps';
+  return 'timed';
+}
 
 /** A whole guided activity: something a person can start and finish. */
 export type GuidedActivity = {

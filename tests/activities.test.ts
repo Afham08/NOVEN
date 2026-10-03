@@ -374,10 +374,10 @@ export function run(): void {
      * it, and then asked the same question the Wellness screen asks.
      *
      * The evidence needed to answer this already exists in the record.
-     * GuidedSession counts `stepsCompleted` from elapsed time and is
-     * deliberately NOT derived from the phase - its own comment says deriving
-     * it from "finished" would credit a five-second tap with a whole
-     * meditation - so a partial session stores a truthful partial count.
+     * GuidedSession credits a step only when something actually completed it -
+     * the step's clock running out, a hold being met, a repetition target being
+     * reached - so a partial session stores a truthful partial count rather than
+     * one inferred from whether the session happened to reach the end.
      */
     const found = BY_KIND.wellness.find((a) => a.steps.length >= 3);
     if (found === undefined) throw new Error('need a multi-step wellness activity');

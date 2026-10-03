@@ -6,6 +6,7 @@ import { run as runButtonAppearance } from './button-appearance.test';
 import { run as runBreathCycle } from './breath-cycle.test';
 import { run as runCoachingFeedback } from './coaching-feedback.test';
 import { run as runExerciseLibrary } from './exercise-library.test';
+import { run as runGuidedCompletion } from './guided-completion.test';
 import { run as runHistoryFormat } from './history-format.test';
 import { run as runMeditationAudio } from './meditation-audio.test';
 import { run as runMetrics } from './metrics.test';
@@ -32,6 +33,7 @@ async function main(): Promise<void> {
   runButtonAppearance();
   runCoachingFeedback();
   runExerciseLibrary();
+  runGuidedCompletion();
   runHistoryFormat();
   runMetrics();
   runMeditationGuidance();
