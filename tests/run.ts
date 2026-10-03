@@ -7,6 +7,7 @@ import { run as runBreathCycle } from './breath-cycle.test';
 import { run as runCoachingFeedback } from './coaching-feedback.test';
 import { run as runExerciseLibrary } from './exercise-library.test';
 import { run as runHistoryFormat } from './history-format.test';
+import { run as runMeditationAudio } from './meditation-audio.test';
 import { run as runMetrics } from './metrics.test';
 import { run as runMeditationGuidance } from './meditation-guidance.test';
 import { run as runPoseStream } from './pose-stream.test';
@@ -34,6 +35,7 @@ async function main(): Promise<void> {
   runHistoryFormat();
   runMetrics();
   runMeditationGuidance();
+  runMeditationAudio();
   runPoseUtils();
   runRepDetector();
   runRepAggregation();

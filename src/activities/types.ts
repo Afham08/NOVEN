@@ -121,6 +121,25 @@ export type GuidedActivity = {
   progressNoun: string;
   /** When to stop. Every guided activity has one, because every person can. */
   safetyNote: string;
+  /**
+   * Optional background sound for the session. Meditation only - see
+   * `ambientAudioFor()` in meditation-audio.ts, which is the single place that
+   * decides that, so this field being present on a Yoga or Wellness activity
+   * cannot make it play anything.
+   *
+   * OPTIONAL AND CURRENTLY UNUSED BY ANY ACTIVITY. There is no audio file in the
+   * app, and inventing one is not something a build should do, so nothing
+   * declares this yet and every meditation is silent. It exists so that adding a
+   * licensed bed later is a one-line catalogue change rather than a new feature,
+   * and so the rest of the path is exercised by tests today rather than by the
+   * first person who tries it on a real device.
+   */
+  ambientAudio?: {
+    /** A bundled asset via `require()`, or a URL / file path. */
+    source: number | string;
+    /** 0..1. Defaults to a quiet bed; see DEFAULT_AMBIENT_VOLUME. */
+    volume?: number;
+  };
 };
 
 /** Sum of a set of steps' seconds, clamped so a bad step cannot go negative. */

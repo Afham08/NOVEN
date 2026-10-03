@@ -21,6 +21,12 @@ import {
   MeditationPostureTracker,
   type MeditationGuidance,
 } from '@/activities/meditation-guidance';
+import {
+  ambientAudioFor,
+  createExpoAudioDriver,
+  MeditationAudioController,
+  type MeditationAudioPhase,
+} from '@/activities/meditation-audio';
 import type { GuidedActivity } from '@/activities/types';
 import { getYogaPoseRule, type YogaPoseRule } from '@/activities/yoga-poses';
 import { YogaHoldTracker, type YogaHoldSnapshot } from '@/activities/yoga-hold';
@@ -151,6 +157,123 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
       voice.dispose();
       if (voiceRef.current === voice) voiceRef.current = null;
     };
+  }, []);
+
+  /**
+   * The optional ambient bed, resolved through `ambientAudioFor` so that only a
+   * meditation can have one. `undefined` for everything else, and today for every
+   * meditation too: no activity declares a source yet, so there is no controller,
+   * no player, and nothing on screen. That is the honest resting state - the app
+   * does not claim a sound it does not have.
+   *
+   * Deps are the source and the volume rather than the object, so this cannot
+   * re-run because something upstream rebuilt the activity.
+   */
+  const ambientAudio = ambientAudioFor(activity);
+  const ambientSource = ambientAudio?.source;
+  const ambientVolume = ambientAudio?.volume;
+
+  /**
+   * Ambient sound, in exactly the same shape as the voice controller above: a
+   * pure object created by a mount effect, reached through a ref from the
+   * Start/Pause/Resume/End callbacks, and disposed on unmount. Every one of those
+   * callbacks already exists for the session and the voice, so audio joins them
+   * rather than adding a second set of lifecycle rules to remember.
+   *
+   * Deliberately NOT wired to the clock. The controller is told what the session
+   * is doing by the same four callbacks that tell the voice, so there is no
+   * audio interval, no polling, and nothing that can disagree with `GuidedSession`
+   * about whether the session is running.
+   */
+  const audioRef = useRef<MeditationAudioController | null>(null);
+
+  /**
+   * Mirrors the controller's phase into React so the ambient control can label
+   * itself honestly. Only used by the control, which is why this is not the
+   * source of truth for anything: the controller is.
+   */
+  const [audioPhase, setAudioPhase] = useState<MeditationAudioPhase>('disabled');
+
+  /**
+   * Whether the person has ambient sound switched on. Starts on, because a
+   * meditation that declares a source has asked for it and the volume is quiet;
+   * there is nothing to opt into and the toggle exists to turn it OFF, which is
+   * the direction somebody actually reaches for mid-session.
+   */
+  const [ambientOn, setAmbientOn] = useState(true);
+
+  /**
+   * The same value as a ref, for the Start and Resume callbacks to read.
+   *
+   * Those two callbacks are deliberately stable - other effects depend on them -
+   * so they cannot close over state that changes. Reading a ref means "is ambient
+   * sound wanted right now" is answered by the CURRENT value at the moment Start
+   * is tapped, which is the only correct answer: tapping Start after switching
+   * the bed off must not start it again just because the callback was built when
+   * it was on.
+   */
+  const ambientOnRef = useRef(ambientOn);
+
+  useEffect(() => {
+    if (ambientSource === undefined) return;
+    const audio = new MeditationAudioController(createExpoAudioDriver(), {
+      volume: ambientVolume,
+    });
+    audioRef.current = audio;
+
+    /*
+     * Subscribed before the load is asked for, and that ordering matters: `load()`
+     * moves the controller to `loading` synchronously, so subscribing afterwards
+     * would miss the first transition and the control would sit on its initial
+     * 'disabled' label until something else changed.
+     */
+    const unsubscribe = audio.subscribe(() => setAudioPhase(audio.snapshot().phase));
+
+    /*
+     * Loaded on mount rather than on Start, so the bed is already there when the
+     * session begins instead of arriving a moment late. `play()` is recorded as
+     * the intent immediately and applied when the load lands, so this is not
+     * awaited and cannot produce an unhandled rejection: if the device has no
+     * working audio, `load()` resolves into `error` and the session is simply
+     * silent.
+     */
+    void audio.load(ambientSource);
+
+    return () => {
+      // Unsubscribed BEFORE disposing, so a late load cannot call setState on a
+      // screen that has already navigated away.
+      unsubscribe();
+      audio.dispose();
+      if (audioRef.current === audio) audioRef.current = null;
+    };
+  }, [ambientSource, ambientVolume]);
+
+  /**
+   * The ambient control's label. It reports only what the controller actually
+   * knows: "playing" is shown only when playback genuinely is, so a bed that is
+   * loading or paused is never described as playing.
+   *
+   * "On" is the switch's position, not a claim about sound — it means the person
+   * has not switched it off. That is also why a failed load falls through to
+   * "Ambient sound on" rather than to a message: a device with no working audio
+   * should leave a meditation completely alone, and an error string in the middle
+   * of a breathing session is a worse experience than silence. There is no state
+   * here that would ever read "Music playing" without audio actually playing.
+   */
+  const ambientLabel = !ambientOn
+    ? 'Ambient sound off'
+    : audioPhase === 'playing'
+      ? 'Ambient sound playing'
+      : 'Ambient sound on';
+
+  const toggleAmbient = useCallback(() => {
+    const next = !ambientOnRef.current;
+    ambientOnRef.current = next;
+    setAmbientOn(next);
+    // Stopping rather than unloading: the bed stays loaded so switching it back
+    // on is instant, and so the volume the person chose survives the toggle.
+    if (next) audioRef.current?.play();
+    else audioRef.current?.stop();
   }, []);
 
   /** Current step's camera config, if any. */
@@ -408,6 +531,13 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
     // the controller's state machine decides everything else.
     voiceRef.current?.reset();
     voiceRef.current?.announceStart();
+    /*
+     * Ambient sound follows the session and is told about it here, once, by the
+     * same callback that starts the clock. If the person switched it off, it stays
+     * off; if it is switched back on later the play is requested from the toggle
+     * instead. Either way the bed can never start before, or outlast, the session.
+     */
+    if (ambientOnRef.current) audioRef.current?.play();
   }, [session]);
 
   const pause = useCallback(() => {
@@ -423,6 +553,9 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
     // The controller suspends itself while paused; nothing further is spoken
     // until Resume, exactly matching the exercise session's policy.
     voiceRef.current?.announcePause();
+    // Silence for the same reason, and with the same guarantee: a bed that is
+    // still loading is recorded as paused rather than left to arrive playing.
+    audioRef.current?.pause();
   }, [session]);
 
   const resume = useCallback(() => {
@@ -430,6 +563,7 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
     poseTrackerRef.current?.resume();
     setSnapshot(session.snapshot());
     voiceRef.current?.announceResume();
+    if (ambientOnRef.current) audioRef.current?.play();
   }, [session]);
 
   /**
@@ -670,6 +804,17 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
        * nothing still passes a true 0.
        */
       voiceRef.current?.announceCompletion(measuredReps(repTallyRef.current));
+
+      /*
+       * The bed stops with the session, before the save is awaited. This is
+       * called both when the person presses End and when a session runs to its end
+       * by itself, so it is the one place the sound has to end - and ending it
+       * here rather than in the unmount cleanup means the audio stops the instant
+       * the session does, not several hundred milliseconds later while a write is
+       * in flight. A bed that is still loading at this point has its intent set to
+       * stopped, so the player it becomes is never played.
+       */
+      audioRef.current?.stop();
 
       /*
        * The repetitions are the ones the camera steps' engines actually counted,
@@ -1149,6 +1294,39 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
       )}
 
       {/*
+        The ambient control, rendered ONLY for a meditation that actually declares
+        a source. Nothing does today, so this is absent from the app as it stands -
+        which is the point: there is no switch for a sound the app does not have,
+        and no way to mistake an absent feature for one that failed.
+
+        Kept to a single ghost button rather than a settings row because the whole
+        feature is one optional layer, and a settings screen for it would be
+        claiming more than it does.
+      */}
+      {ambientAudio ? (
+        <View style={styles.ambientRow}>
+          <Button
+            variant="ghost"
+            size="medium"
+            title={ambientLabel}
+            onPress={toggleAmbient}
+            fullWidth={false}
+            style={styles.ambientControl}
+          />
+          {/*
+            An honest one-line explanation, and only while the session is not yet
+            under way. Once someone has started, the label is the control and a
+            sentence about it would be in the way.
+          */}
+          {notStarted ? (
+            <Text style={[styles.ambientNote, { color: theme.textSecondary }]}>
+              Optional background sound. Breathing guidance is spoken either way.
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
+
+      {/*
         Restarting a session that is under way discards real time, so it is a link
         rather than a button and it is not offered before anything has happened.
       */}
@@ -1424,6 +1602,16 @@ const styles = StyleSheet.create({
   },
   control: {
     flex: 1,
+  },
+  ambientRow: {
+    marginTop: Spacing.three,
+    gap: Spacing.two,
+  },
+  ambientControl: {
+    alignSelf: 'flex-start',
+  },
+  ambientNote: {
+    ...Type.label,
   },
   reset: {
     alignItems: 'center',
