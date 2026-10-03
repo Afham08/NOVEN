@@ -292,12 +292,21 @@ export class GuidedSession {
    * happens: it is a timed budget that finishes on time exactly as it always did,
    * and it must not become a step that ends whenever somebody moved once.
    *
+   * The kind is asked of `guidedStepCompletion` rather than tested here, so that
+   * this path and the clock's own settlement cannot disagree about what a step is.
+   * A step carrying both a `poseRuleId` and a `targetReps` is a HOLD step, because
+   * that function gives the pose priority: asking one camera frame to satisfy two
+   * different measurements is not a step that should finish on either one quietly.
+   * Without this the repetition count would finish a pose nobody ever held, which
+   * is the one false record this whole class exists to prevent.
+   *
    * Returns true only for the call that reached the target, so a frame rate that
    * reports the same total thirty times a second still completes the step once.
    */
   reportStepReps(reps: number): boolean {
     const step = this.steps[this.stepIndex()];
     if (step === undefined || step.targetReps === undefined) return false;
+    if (guidedStepCompletion(step) !== 'reps') return false;
     if (!Number.isFinite(reps) || reps < step.targetReps) return false;
     return this.creditCurrentStep();
   }

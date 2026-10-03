@@ -622,6 +622,52 @@ export function run(): void {
     check('the step is still the one under way', session.snapshot().currentStep?.title === 'Sit and Stand', session.snapshot().currentStep?.title);
   });
 
+  suite('guided completion: a repetition count cannot finish a step that is held', () => {
+    /*
+     * The two paths that can complete a step have to agree about what KIND of step
+     * they are looking at, or the same step can be finished two contradictory ways.
+     * `guidedStepCompletion` gives a `poseRuleId` priority over a `targetReps`, so a
+     * step carrying both is a hold - and asking one camera frame to satisfy a shape
+     * and a count is not something either measurement should quietly settle alone.
+     *
+     * No activity declares both today, so this cannot fail in the app as it stands.
+     * It is pinned because the day one does, the answer must already be right: a
+     * pose nobody ever held must not be credited because a count arrived.
+     */
+    const step = reps('Mountain and count', 35, 3);
+    step.poseRuleId = 'mountain';
+    const activity = activityWith([step]);
+    const clock = fakeClock();
+    const session = new GuidedSession(activity, clock.now);
+    session.start();
+
+    check('the step is a hold step, the pose winning over the count', guidedStepCompletion(activity.steps[0]) === 'hold', guidedStepCompletion(activity.steps[0]));
+    check('reaching the target does not finish it', session.reportStepReps(3) === false);
+    check('and a wild over-count does not either', session.reportStepReps(9_999) === false);
+    check('so nothing was credited by a count', session.snapshot().stepsCompleted === 0, session.snapshot().stepsCompleted);
+    check('the step under way is still that step', session.snapshot().currentStep?.title === 'Mountain and count', session.snapshot().currentStep?.title);
+
+    clock.advance(35);
+    check('the clock cannot finish it either, for the same reason', session.snapshot().stepsCompleted === 0, session.snapshot().stepsCompleted);
+    check('so the step budget lapsing ends the activity with it uncounted', session.snapshot().finished, session.snapshot().phase);
+
+    check('only holding the pose finishes it', session.completeStep(0) === false);
+  });
+
+  suite('guided completion: the hold still finishes a step that also declares a target', () => {
+    const step = reps('Mountain and count', 35, 3);
+    step.poseRuleId = 'mountain';
+    const activity = activityWith([step, timed('Rest', 30)]);
+    const clock = fakeClock();
+    const session = new GuidedSession(activity, clock.now);
+    session.start();
+    clock.advance(5);
+
+    check('the hold is accepted', session.completeStep(0) === true);
+    check('and completes the step exactly once', session.snapshot().stepsCompleted === 1, session.snapshot().stepsCompleted);
+    check('the count still means nothing to it', session.reportStepReps(3) === false);
+  });
+
   suite('guided completion: no activity in the catalogue declares a target yet', () => {
     /*
      * The honest state of this feature, pinned so it cannot drift silently. The
