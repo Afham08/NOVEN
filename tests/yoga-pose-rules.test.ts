@@ -2,8 +2,17 @@ import { check, suite } from './harness';
 
 import type { LandmarkEventPayload, PoseLandmarkName, PosePresence } from '../modules/pose-tracker';
 
+import { describeRoutineMeta, describeSessionOutcome } from '../src/activities/activity-format';
+import { beginStep, emptyRepTally, measuredReps, observeStepReps } from '../src/activities/guided-reps';
 import { GuidedSession } from '../src/activities/guided-session';
+import { countDoneToday, todayStatus } from '../src/activities/today';
 import { yogaRoutines } from '../src/activities/yoga';
+import {
+  createSessionRecord,
+  parseSessionRecord,
+  SESSION_HISTORY_KEY,
+  type SessionRecord,
+} from '../src/exercise/session-store';
 import {
   YOGA_ARM_AT_SHOULDER_RATIO,
   YOGA_ARMS_SPREAD_MIN_RATIO,
@@ -800,13 +809,25 @@ suite('yoga pose steps: a pose step is a camera step that counts nothing', () =>
    * The step's clock must outlast the pose's hold. The hold only starts once the
    * shape has been steady, and restarts from zero if broken, so a step as short as
    * the hold would end while the person was still finding the position.
+   *
+   * The settle window counts against the step too, because banking cannot start
+   * until it has passed. Asserting only `seconds > holdSeconds` would pass a step
+   * with no room for the settle window at all - which is precisely the step that
+   * runs out while somebody is still finding the position, the failure this check
+   * exists to prevent.
    */
   for (const step of poseSteps) {
     const rule = getYogaPoseRule(step.poseRuleId);
+    const settleSeconds = YOGA_HOLD_SETTLE_MS / 1000;
     check(
       `${step.title} gives more time than the pose asks to be held`,
       step.seconds > (rule?.holdSeconds ?? 0),
       { seconds: step.seconds, hold: rule?.holdSeconds },
+    );
+    check(
+      `${step.title} also leaves room for the pose to settle before it counts`,
+      step.seconds > (rule?.holdSeconds ?? 0) + settleSeconds,
+      { seconds: step.seconds, hold: rule?.holdSeconds, settle: settleSeconds },
     );
   }
 
@@ -916,6 +937,332 @@ suite('yoga pose steps: a pose step is wired into the screen without an engine',
    * into the next and could complete it in seconds.
    */
   check('each pose step gets a fresh hold tracker', code.includes('new YogaHoldTracker(currentPoseRule)'));
+});
+
+suite('yoga routines: one routine exercises all three ways the camera is used', () => {
+  /*
+   * The three seated routines above the pose routine cannot host a pose step: the
+   * rules are standing poses, measured from the front and the side, so putting one
+   * into a seated neck stretch would be judging somebody from an angle nobody told
+   * them about. That leaves the standing routine as the only honest place for the
+   * three camera modes to meet, so it has to actually contain all three - otherwise
+   * nothing in the app ever proves that a counted repetition and a banked hold can
+   * sit in the same session without either contaminating the other.
+   */
+  const mixed = yogaRoutines.find((r) => r.id === 'standing-pose-holds');
+  if (!mixed) {
+    check('the mixed routine exists', false);
+    return;
+  }
+
+  const timed = mixed.steps.filter((s) => s.cameraConfigId === undefined && s.poseRuleId === undefined);
+  const reps = mixed.steps.filter((s) => s.cameraConfigId !== undefined);
+  const poses = mixed.steps.filter((s) => s.poseRuleId !== undefined);
+
+  check('it opens with a step that uses no camera at all', timed.length >= 1, timed.length);
+  check('and closes with one', mixed.steps[mixed.steps.length - 1].cameraConfigId === undefined
+    && mixed.steps[mixed.steps.length - 1].poseRuleId === undefined);
+  check('it counts at least one repetition', reps.length >= 1, reps.length);
+  check('and holds at least one pose', poses.length >= 1, poses.length);
+  check('every step is exactly one of the three kinds', timed.length + reps.length + poses.length === mixed.steps.length);
+  check('no step is both a repetition and a pose', mixed.steps.every((s) => !(s.cameraConfigId !== undefined && s.poseRuleId !== undefined)));
+
+  /*
+   * Every counted step has to name a config that really exists, or the screen would
+   * build a SessionEngine from undefined and the warm-up would silently measure
+   * nothing while looking perfectly correct.
+   */
+  check(
+    'every counted step names a movement the session can actually measure',
+    reps.every((s) => typeof s.cameraConfigId === 'string' && s.cameraConfigId.length > 0),
+    reps.map((s) => s.cameraConfigId),
+  );
+
+  /*
+   * Ordering: a warm-up before the holds is what a person would expect, and it also
+   * means the repetition is counted BEFORE any pose, so a bug that let a pose reset
+   * the rep tally would be visible rather than merely latent.
+   */
+  const firstRep = mixed.steps.findIndex((s) => s.cameraConfigId !== undefined);
+  const firstPose = mixed.steps.findIndex((s) => s.poseRuleId !== undefined);
+  check('the counted warm-up comes before the first pose', firstRep > -1 && firstRep < firstPose, { firstRep, firstPose });
+
+  check('the summary still says the routine is standing', /standing/i.test(mixed.summary), mixed.summary);
+  check('the summary admits the warm-up is not a held pose', /warm-?up/i.test(mixed.summary), mixed.summary);
+});
+
+suite('yoga routines: a pose step is measured by the hold tracker and nobody else', () => {
+  /*
+   * The routing claim, checked against the screen's own source because that is where
+   * the routing lives - the tracker and the engine are separate objects and only the
+   * screen decides which one a frame reaches.
+   */
+  const code = guidedScreenCode;
+
+  check('the pose branch returns before the engine is read', (() => {
+    const pose = code.indexOf('poseTracker.advance(presence, landmarks, timestampMs)');
+    const engine = code.indexOf('const engine = cameraEngineRef.current');
+    return pose > -1 && pose < engine;
+  })());
+
+  check('no engine is built for a pose step', code.includes('!isPoseStep)'));
+
+  /*
+   * The rep tally is re-based only where an engine is built. If a pose step rebased
+   * it, the hold would wipe the repetitions the warm-up just counted.
+   */
+  const engineEffectAt = code.indexOf('new SessionEngine(currentStepConfig)');
+  const beginStepAt = code.indexOf('repTallyRef.current = beginStep(');
+  const poseGuardAt = code.indexOf('!isPoseStep)');
+  check(
+    'the rep tally is rebased inside the engine branch, after the pose guard',
+    poseGuardAt > -1 && poseGuardAt < engineEffectAt && engineEffectAt < beginStepAt,
+    { poseGuardAt, engineEffectAt, beginStepAt },
+  );
+});
+
+suite('yoga routines: a hold cannot be completed by a pose that was never held', () => {
+  const required = Math.round(YOGA_POSE_RULES.mountain.holdSeconds * 1000);
+
+  /*
+   * Banking starts only after the settle window, so the frames that bank a full
+   * hold end at `SETTLE + required` and everything below is measured against that
+   * line. `shortMs` is deliberately half a second short of it, so the broken frame
+   * lands while the hold is genuinely incomplete rather than a frame or two too
+   * late - the difference between "the pose was broken" and "the pose finished
+   * first, and then something else happened".
+   */
+  const shortMs = YOGA_HOLD_SETTLE_MS + required - 500;
+
+  const validUpTo = (ms: number): Array<[PosePresence, LandmarkEventPayload[], number]> => {
+    const frames: Array<[PosePresence, LandmarkEventPayload[], number]> = [];
+    for (let t = 0; t <= ms; t += 100) frames.push(['tracked', mountainValid(), 1000 + t]);
+    return frames;
+  };
+
+  /*
+   * The realistic failure: the person gets the shape right for most of the step and
+   * then drifts. A hold that PAUSED instead of resetting would finish here, and the
+   * routine would announce a pose nobody held.
+   */
+  const drifted = countCompletions('mountain', [...validUpTo(shortMs), ['tracked', chairValid(), 1000 + shortMs + 100]]);
+  check('a pose broken before the hold elapses never completes', drifted.completions === 0, drifted.completions);
+
+  /*
+   * The same run WITHOUT the break: the control that proves the failure above is
+   * the break and not the length of the frames.
+   */
+  const control = countCompletions('mountain', validUpTo(shortMs + 600));
+  check('the same frames without the break do complete', control.completions === 1, control.completions);
+
+  /*
+   * Walking out of frame is not holding a pose either, and it is a different code
+   * path from being out of pose - a frame the camera did not see cannot be evidence
+   * that the shape survived.
+   */
+  const lost = countCompletions('mountain', [...validUpTo(shortMs), ['lost', [], 1000 + shortMs + 100]]);
+  check('losing the camera before the hold elapses never completes', lost.completions === 0, lost.completions);
+
+  /*
+   * Leaving the pose step early is the early-exit case: the tracker is simply never
+   * offered the rest of the hold, so there is nothing to complete. Modelled the way
+   * the screen does it - abandon the tracker rather than feeding it a break.
+   */
+  const abandoned = new YogaHoldTracker(YOGA_POSE_RULES.mountain);
+  let spoke = 0;
+  for (const frame of validUpTo(shortMs)) {
+    if (abandoned.advance(frame[0], frame[1], frame[2]).justCompleted) spoke += 1;
+  }
+  abandoned.reset();
+  check('abandoning the step mid-hold announces nothing', spoke === 0, spoke);
+});
+
+suite('yoga routines: each pose step starts its hold from nothing', () => {
+  /*
+   * Two pose steps in one routine means two trackers. If they shared state, arriving
+   * at Warrior II with Mountain already banked would complete it in seconds - so this
+   * drives the first tracker almost to completion, then builds the second and checks
+   * it knows nothing about it.
+   */
+  const required = Math.round(YOGA_POSE_RULES.mountain.holdSeconds * 1000);
+  const first = new YogaHoldTracker(YOGA_POSE_RULES.mountain);
+  for (let t = 0; t <= required + YOGA_HOLD_SETTLE_MS; t += 100) {
+    first.advance('tracked', mountainValid(), 1000 + t);
+  }
+  const banked = first.advance('tracked', mountainValid(), 1000 + required + YOGA_HOLD_SETTLE_MS + 100);
+  check('the first tracker did bank most of the hold', banked.holdMs > 0, banked.holdMs);
+
+  const second = new YogaHoldTracker(YOGA_POSE_RULES['warrior-ii']);
+  const fresh = second.advance('tracked', warriorValid(), 5000);
+  check('the next pose step begins at zero', fresh.holdMs === 0, fresh.holdMs);
+  check('and at full time remaining', fresh.remainingSeconds === fresh.requiredSeconds, fresh.remainingSeconds);
+
+  /*
+   * A completed hold is terminal, so the same tracker cannot be talked into
+   * announcing the pose a second time by the frames that keep arriving.
+   */
+  const firstAgain = countCompletions('mountain', validFramesOver(required * 3, 100));
+  check('one tracker announces the pose exactly once however long it runs', firstAgain.completions === 1, firstAgain.completions);
+});
+
+suite('yoga routines: the three camera modes keep their measurements apart', () => {
+  /*
+   * The rep tally arithmetic the screen performs. A pose step has no engine and
+   * therefore never calls observeStepReps or beginStep, so a hold can neither add to
+   * the repetitions nor reset them - which is what stops a routine from reporting a
+   * pose as though it were repetitions.
+   */
+  let tally = emptyRepTally();
+  check('a routine that has measured nothing is a true zero', measuredReps(tally) === 0);
+
+  tally = observeStepReps(tally, 4);
+  check('the warm-up contributes its repetitions', measuredReps(tally) === 4, measuredReps(tally));
+
+  // Pose steps pass through with no call at all.
+  tally = beginStep(tally);
+  check('re-basing for the next step keeps what was already counted', measuredReps(tally) === 4, measuredReps(tally));
+  check('a pose cannot reset the count to zero', measuredReps(tally) !== 0);
+
+  tally = observeStepReps(tally, 2);
+  check('a later counted step adds to the same total', measuredReps(tally) === 6, measuredReps(tally));
+
+  /*
+   * The routine made only of poses reports no repetitions at all - not a guess, a
+   * zero - because nothing in it ever measured one.
+   */
+  const poseOnly = yogaRoutines.filter((r) => r.steps.every((s) => s.poseRuleId !== undefined));
+  check('no routine in the catalogue is made only of poses', poseOnly.length === 0, poseOnly.map((r) => r.id));
+});
+
+suite('yoga routines: a finished pose routine is recorded like any other session', () => {
+  const mixed = yogaRoutines.find((r) => r.id === 'standing-pose-holds');
+  if (!mixed) {
+    check('the mixed routine exists', false);
+    return;
+  }
+
+  /*
+   * Built exactly the way the screen builds it, then read back through the store's
+   * own parser - so the thing under test is a record that could actually be written
+   * to a real device, not a hand-made object that happens to look right.
+   */
+  const record = createSessionRecord({
+    id: 'pose-session-1',
+    exerciseId: mixed.id,
+    exerciseName: mixed.name,
+    completedAt: '2026-05-04T09:00:00.000Z',
+    metrics: {
+      reps: 0,
+      durationSeconds: 180,
+      paceRpm: null,
+      rangeMinDeg: null,
+      rangeMaxDeg: null,
+      consistencyPct: null,
+    },
+    activityKind: mixed.kind,
+    stepsCompleted: mixed.steps.length,
+  });
+
+  check('the record survives a round trip through storage', parseSessionRecord(JSON.parse(JSON.stringify(record))) !== null);
+  const parsed = parseSessionRecord(JSON.parse(JSON.stringify(record)));
+  check('it keeps its id', parsed?.id === 'pose-session-1', parsed?.id);
+  check('it keeps its kind', parsed?.activityKind === 'yoga', parsed?.activityKind);
+  check('it keeps the instant it finished', parsed?.completedAt === '2026-05-04T09:00:00.000Z', parsed?.completedAt);
+  check('it keeps how many steps ran', parsed?.stepsCompleted === mixed.steps.length, parsed?.stepsCompleted);
+  check('and it invents no repetitions', parsed?.reps === 0, parsed?.reps);
+
+  /*
+   * The storage key is the one every other session already uses. A pose routine
+   * written somewhere else would not appear in the history at all.
+   */
+  check('it is stored under the existing history key', SESSION_HISTORY_KEY === 'noven.session-history.v1');
+
+  check('the history describes it in poses', describeSessionOutcome(record) === `${mixed.steps.length} of ${mixed.steps.length} poses`, describeSessionOutcome(record));
+  check('a part-finished routine says so', describeSessionOutcome({ ...record, stepsCompleted: 2 }) === `2 of ${mixed.steps.length} poses`, describeSessionOutcome({ ...record, stepsCompleted: 2 }));
+  check('the card counts every step, camera or not', describeRoutineMeta(mixed).endsWith(`· ${mixed.steps.length} poses`), describeRoutineMeta(mixed));
+});
+
+suite('yoga routines: Today counts a finished routine and ignores an abandoned one', () => {
+  const mixed = yogaRoutines.find((r) => r.id === 'standing-pose-holds');
+  if (!mixed) {
+    check('the mixed routine exists', false);
+    return;
+  }
+
+  const now = new Date('2026-05-04T12:00:00.000Z');
+  const todayIso = '2026-05-04T09:00:00.000Z';
+  const yesterdayIso = '2026-05-03T09:00:00.000Z';
+
+  const base: SessionRecord = {
+    id: 'r1',
+    exerciseId: mixed.id,
+    exerciseName: mixed.name,
+    completedAt: todayIso,
+    reps: 0,
+    durationSeconds: 180,
+    paceRpm: null,
+    rangeMinDeg: null,
+    rangeMaxDeg: null,
+    consistencyPct: null,
+    activityKind: 'yoga',
+    stepsCompleted: mixed.steps.length,
+  };
+
+  const status = (records: SessionRecord[]) => todayStatus(records, yogaRoutines, 'yoga', now);
+
+  const finished = status([base]);
+  check('a routine that ran every step counts as done', finished.find((s) => s.activityId === mixed.id)?.done === true, finished);
+  check('and counts once', finished.find((s) => s.activityId === mixed.id)?.timesToday === 1, finished);
+
+  /*
+   * Abandoned part-way: the step clock says how far it got, so a routine that never
+   * reached its last pose is not ticked off. This is `ranEveryStep`'s existing
+   * behaviour and it is unchanged by pose holds - a pose step is a step like any
+   * other, so reaching the end of the clock is what counts.
+   */
+  const abandoned = status([{ ...base, id: 'r2', stepsCompleted: mixed.steps.length - 1 }]);
+  check('a routine stopped short is not done', abandoned.find((s) => s.activityId === mixed.id)?.done === false, abandoned);
+
+  const untouched = status([{ ...base, id: 'r3', completedAt: yesterdayIso }]);
+  check("yesterday's routine does not count today", untouched.find((s) => s.activityId === mixed.id)?.done === false, untouched);
+
+  const twice = status([base, { ...base, id: 'r4' }]);
+  check('two finished runs count twice', twice.find((s) => s.activityId === mixed.id)?.timesToday === 2, twice);
+
+  /*
+   * The seated routines are untouched by all of this: only the record for THIS
+   * routine can mark it done, and a pose routine finishing does not mark a seated one.
+   */
+  const seated = yogaRoutines.find((r) => r.id === 'chair-yoga-flow');
+  check('finishing one routine does not finish another', seated !== undefined
+    && status([base]).find((s) => s.activityId === 'chair-yoga-flow')?.done === false);
+  check('today still counts every yoga routine in the catalogue', countDoneToday(status([base])).total === yogaRoutines.length, countDoneToday(status([base])));
+  check('and only the one that was finished', countDoneToday(status([base])).done === 1, countDoneToday(status([base])));
+});
+
+suite('yoga routines: a broken pose is corrected once, not once per frame', () => {
+  /*
+   * The same source-reading convention as the screen suite above, for the same
+   * reason. What is being guarded is a behaviour that is invisible in every other
+   * test: `consider` with an override text is the ONE-SHOT path and is exempt from
+   * the controller's state-change rules, so it speaks every single time it is
+   * called. Called from the camera frame, a pose can stay broken for thousands of
+   * frames.
+   */
+  const code = guidedScreenCode;
+
+  check('the screen remembers the correction it has already spoken', code.includes('announcedCorrectionRef'));
+  check(
+    'and only speaks when the sentence is a new one',
+    code.includes('if (announcedCorrectionRef.current !== hold.correction)'),
+  );
+  check('the spoken sentence is the one it recorded', code.includes('announcedCorrectionRef.current = hold.correction;'));
+  check(
+    'a frame that is not broken re-arms it, so a later break is heard again',
+    /else \{\s*announcedCorrectionRef\.current = null;/.test(code),
+  );
+  check('a new pose step re-arms it too', code.includes('announcedCorrectionRef.current = null;'));
+  check('nothing speaks per frame without passing that guard', code.includes("consider('positioning', hold.correction)"));
 });
 
 /** Removes comments, so code that matters is not confused with prose about it. */

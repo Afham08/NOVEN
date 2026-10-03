@@ -201,6 +201,25 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
   const poseTrackerRef = useRef<YogaHoldTracker | null>(null);
 
   /**
+   * The correction currently being spoken, so a broken pose is corrected once.
+   *
+   * The same once-only rule `announcedStepRef` applies to step guidance, and for
+   * the same reason: `consider` with an override text is the ONE-SHOT path, exempt
+   * from the controller's state-change rules, so it speaks every time it is called.
+   * The correction is produced on the camera frame, and a pose can stay broken for
+   * thousands of frames, so calling the one-shot path from there repeats one
+   * sentence at camera frame rate for as long as it takes to fix.
+   *
+   * Keyed on the correction TEXT rather than a boolean, because a rule reports the
+   * first constraint still unmet: fixing one thing can change the sentence while
+   * the pose stays broken, and the new one is worth saying. Cleared on every frame
+   * that is not broken, so a genuine recovery re-arms it and breaking the pose
+   * again is announced once more - and cleared when the step changes, so a second
+   * step using the same rule is corrected for itself.
+   */
+  const announcedCorrectionRef = useRef<string | null>(null);
+
+  /**
    * What the pose camera HUD is showing. `null` before the first pose frame
    * arrives, which the HUD renders as a neutral holding message rather than as an
    * assessment nobody has made yet.
@@ -218,10 +237,12 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
   useEffect(() => {
     if (!currentPoseRule) {
       poseTrackerRef.current = null;
+      announcedCorrectionRef.current = null;
       const timer = setTimeout(() => setPoseHold(null), 0);
       return () => clearTimeout(timer);
     }
     poseTrackerRef.current = new YogaHoldTracker(currentPoseRule);
+    announcedCorrectionRef.current = null;
     const timer = setTimeout(() => setPoseHold(null), 0);
     return () => clearTimeout(timer);
   }, [currentPoseRule]);
@@ -420,8 +441,15 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
          * tracker's state changes on the frame the pose is fixed or broken, and
          * that is the only thing worth a sentence. Silence between them is what
          * keeps this from nagging somebody for holding a pose.
+         *
+         * The once-only part is the guard, not the controller: `consider` with an
+         * override text always speaks, so a per-frame caller has to decide for
+         * itself whether this is a new problem. It is a new problem when the
+         * correction is a different sentence from the one already spoken, which is
+         * the whole test below.
          */
         if (hold.justCompleted) {
+          announcedCorrectionRef.current = null;
           voiceRef.current?.consider('good', `${currentPoseRule?.name ?? 'Pose'} held. Well done.`);
         } else if (hold.state === 'invalid' && hold.correction) {
           /*
@@ -431,7 +459,13 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
            * second way of saying the same thing and a second thing to keep in step
            * with this screen.
            */
-          voiceRef.current?.consider('positioning', hold.correction);
+          if (announcedCorrectionRef.current !== hold.correction) {
+            announcedCorrectionRef.current = hold.correction;
+            voiceRef.current?.consider('positioning', hold.correction);
+          }
+        } else {
+          /* Back in the pose, or out of frame: re-arm, so a later break is heard. */
+          announcedCorrectionRef.current = null;
         }
         return;
       }
