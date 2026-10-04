@@ -16,6 +16,7 @@ import {
   type BreathPhaseId,
 } from '@/activities/breath-cycle';
 import { GuidedSession, type GuidedSnapshot } from '@/activities/guided-session';
+import { CompletionOwnership, finishOwnedSession } from '@/activities/completion-ownership';
 import { beginStep, emptyRepTally, measuredReps, observeStepReps, type GuidedRepTally } from '@/activities/guided-reps';
 import {
   MeditationPostureTracker,
@@ -801,12 +802,29 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
    * `leavingRef` makes this once-only, so a double tap on End, a re-render, or the
    * auto-save at the end of a session racing a press cannot record the same
    * session twice or push two result screens.
+   *
+   * `ownership` answers the question `leavingRef` cannot. `leavingRef` is
+   * cleared by `startFresh` - the new session is entitled to save as well - and
+   * clearing it is what let a save still in flight carry on and navigate the new
+   * session to the old one's result. The claim taken here is verified again after
+   * the await, so work that has lost the screen does nothing.
    */
   const leavingRef = useRef(false);
+  const [ownership] = useState(() => new CompletionOwnership());
+
+  /*
+   * Unmounting ends this screen's lifecycle, and the router outlives the
+   * component, so a save that resolves after the screen is gone must not navigate
+   * anything. Releasing on unmount is what makes that continuation abandon rather
+   * than act on a screen that no longer exists.
+   */
+  useEffect(() => () => ownership.release(), [ownership]);
+
   const complete = useCallback(
     async (how: 'finished' | 'stopped') => {
       if (leavingRef.current) return;
       leavingRef.current = true;
+      const token = ownership.claim();
       setSaving(true);
 
       if (how === 'stopped') session.finishEarly();
@@ -867,45 +885,47 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
       });
 
       /*
-       * Awaited, not fired and forgotten. The result screen tells the person
-       * whether their history was written, and that sentence must not be
-       * invented here: swallowing the rejection and navigating anyway would still
-       * render "Saved to your history" on the next screen, which is the one claim
-       * on it that the person cannot check for themselves.
+       * Awaited through `finishOwnedSession`, which is what makes the await safe.
        *
-       * A failing write is neither fatal nor hidden. `saveSession` refuses rather
-       * than overwrite a history it could not read, so letting it reject is
-       * exactly what protects the sessions already on the device; the outcome is
-       * then carried across as the confirmed status the result screen may report.
+       * The write itself is unconditional: the session really happened, so it is
+       * recorded even if the person has already started another one. What is
+       * conditional is everything after it. The finished screen is on-screen while
+       * this is pending, so "Start again" can be pressed in that window; without
+       * the ownership re-check, this continuation would navigate the session that
+       * just started to the result of the one that just ended.
+       *
+       * A failing write is neither fatal nor hidden, and is not retried: a history
+       * that could not be read is not something a second write could safely fix.
+       * `finishOwnedSession` reports it as `saved: false` rather than rethrowing, so
+       * there is no unhandled rejection, and the status still reaches the person as
+       * the result screen's own wording rather than as a swallowed failure.
        */
-      let saveStatus: SaveStatus = 'failed';
-      try {
-        await sessionStore.saveSession(record);
-        saveStatus = 'saved';
-      } catch {
-        // The write did not land. Reported to the person on the result screen
-        // rather than swallowed, and deliberately not retried: a history that
-        // could not be read is not something a second write could safely fix.
-      }
-
-      /*
-       * `replace`, not `push`. The result is the end of this session, and leaving
-       * the session screen underneath it would mean the back gesture returns to a
-       * finished timer rather than to the list the person came from.
-       */
-      router.replace({
-        pathname: '/activity-result',
-        params: {
-          id: activity.id,
-          kind: activity.kind,
-          steps: String(final.stepsCompleted),
-          seconds: String(final.elapsedSeconds),
-          how,
-          saved: saveStatus,
+      await finishOwnedSession({
+        ownership,
+        token,
+        save: () => sessionStore.saveSession(record),
+        navigate: (saved) => {
+          const saveStatus: SaveStatus = saved ? 'saved' : 'failed';
+          /*
+           * `replace`, not `push`. The result is the end of this session, and
+           * leaving the session screen underneath it would mean the back gesture
+           * returns to a finished timer rather than to the list it came from.
+           */
+          router.replace({
+            pathname: '/activity-result',
+            params: {
+              id: activity.id,
+              kind: activity.kind,
+              steps: String(final.stepsCompleted),
+              seconds: String(final.elapsedSeconds),
+              how,
+              saved: saveStatus,
+            },
+          });
         },
       });
     },
-    [activity, router, session],
+    [activity, ownership, router, session],
   );
 
   /**
@@ -1019,12 +1039,20 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
    */
   const startFresh = useCallback(() => {
     leavingRef.current = false;
+    /*
+     * Revoking the claim is the load-bearing part of this function. Clearing
+     * `leavingRef` above re-admits a completion, which is correct - but any save
+     * still in flight from the session that just ended would then be free to
+     * navigate this new session to the old one's result. Releasing ownership
+     * first means that continuation resolves to "abandoned" instead.
+     */
+    ownership.release();
     repTallyRef.current = emptyRepTally();
     autoSavedRef.current = false;
     setSaving(false);
     announcedStepRef.current = null;
     start();
-  }, [start]);
+  }, [ownership, start]);
   const phaseLabel =
     snapshot.phase === 'ready'
       ? 'Ready'
@@ -1285,14 +1313,24 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
       </Card>
 
       {notStarted || snapshot.finished ? (
-        // A finished session has already been recorded and its result pushed, so
-        // Pause and End are not offered: they would be controls on a session that
-        // is over. What is left is the one thing that makes sense, which is to do
-        // it again.
+        /*
+         * A finished session has already been recorded and its result pushed, so
+         * Pause and End are not offered: they would be controls on a session that
+         * is over. What is left is the one thing that makes sense, which is to do
+         * it again.
+         *
+         * `loading` and `disabled` are belt and braces, not the fix. They close the
+         * window in which a restart can be pressed while the save is still in
+         * flight, but a press can still land before the next render, and a press
+         * does not care what the button looks like - the ownership release in
+         * `startFresh` is what actually makes a stale completion harmless.
+         */
         <Button
           variant="primary"
           title={snapshot.finished ? 'Start again' : 'Start'}
           onPress={startFresh}
+          loading={saving}
+          disabled={saving}
         />
       ) : (
         <View style={styles.controls}>

@@ -44,6 +44,15 @@
  *     not need to "undo" anything: the player arrives, is told to be paused, and
  *     never makes a sound. There is no timer and no polling anywhere in here.
  *
+ *     The volume is reconciled on exactly the same terms, and for the same
+ *     reason. `load` reads the volume to hand to `driver.create`, so a volume
+ *     changed while the load is in flight describes a player that has not been
+ *     born yet; `setVolume` cannot reach it, because there is no handle. Applying
+ *     the current volume when the player arrives is what keeps
+ *     `snapshot().volume` true of the player rather than only of the controller.
+ *     One rule, two pieces of state: nothing that happened before the player
+ *     existed is allowed to survive into it.
+ *
  *  2. A GENERATION COUNTER FOR DISPOSAL. Every operation that invalidates work
  *     in flight bumps `generation`. A load captures the number it started with
  *     and, on resolving, compares it: if it has moved on, the player it just
@@ -334,6 +343,12 @@ export class MeditationAudioController {
   /**
    * Volume in 0..1. Applied to a loaded player immediately, so changing it
    * mid-session does not need a reload and cannot restart the bed.
+   *
+   * Stays synchronous on purpose: it records the volume and does whatever it can
+   * right now. If no player exists yet the value is still recorded, and the load
+   * applies it to the player it produces - so a volume change made during a load
+   * takes effect rather than being silently dropped, without `setVolume` ever
+   * having to wait for a load it does not own.
    */
   setVolume(volume: number): void {
     if (this.disposed) return;
@@ -358,15 +373,32 @@ export class MeditationAudioController {
   }
 
   /**
-   * Applies the CURRENT intent to a player that has just become available.
+   * Applies the CURRENT intent AND VOLUME to a player that has just become
+   * available.
    *
    * This is the whole race story in one method: it is called exactly once per
-   * successful load, and it does not care what the intent was when the load
-   * started, only what it is now.
+   * successful load, and it does not care what the intent or the volume were when
+   * the load started, only what they are now.
+   *
+   * WHY VOLUME IS RECONCILED HERE AND NOT ONLY AT `setVolume`
+   * -------------------------------------------------------
+   * `setVolume` can only reach a player that exists. During a load `handle` is
+   * still null, so a volume change made in that window could only record itself
+   * and hope. Meanwhile `load` had already read `this.volume` to hand to
+   * `driver.create`, so the player being built was configured with the volume
+   * from BEFORE the change. Reconciling volume here closes that window, and it is
+   * the same mechanism intent already used rather than a second idea: the
+   * controller's state is authoritative, and a player adopts it on arrival.
+   *
+   * Applied unconditionally rather than only when it differs, so the guarantee
+   * holds even for a driver that ignored or clamped the volume it was created
+   * with. `snapshot().volume` then describes the player rather than merely
+   * describing the controller.
    */
   private reconcile(): void {
     const handle = this.handle;
     if (!handle) return;
+    safeSetVolume(handle, this.volume);
     if (this.intent === 'playing') {
       if (safePlay(handle)) this.setPhase('playing');
       return;

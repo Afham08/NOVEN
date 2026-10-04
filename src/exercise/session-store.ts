@@ -388,8 +388,70 @@ export function createSessionStore(store: KeyValueStore): SessionStore {
   let cache: SessionRecord[] | null = null;
   let readFailed = false;
 
+  /*
+   * ==========================================================================
+   * WHY THIS STORE NEEDS TWO PIECES OF CONCURRENCY STATE
+   * ==========================================================================
+   *
+   * `cache` and `readFailed` are shared by every caller, and reaching storage
+   * means awaiting. Two things can therefore go wrong that no amount of care
+   * inside a single operation can prevent, because the damage happens BETWEEN
+   * operations.
+   *
+   * A SAVE THAT LOSES A SESSION
+   * Saving is a read-modify-write: read the stored list, drop any entry with the
+   * same id, add the new record, write the whole thing back. Two saves that
+   * interleave both read the same old list and both write a list derived from it,
+   * so whichever lands last erases the other's session. Nothing threw. A user
+   * simply finds a session they had just finished missing from their history.
+   *
+   * A CLEAR THAT UN-CLEARS
+   * A read that is already in flight when `clearSessions()` runs was issued
+   * against the history that existed BEFORE the clear. If it is allowed to land
+   * afterwards, it repopulates the cache with the very records the user just
+   * deleted, and the next save merges into them and writes them back to the key.
+   * Deleting your history would silently fail, which for a privacy control is
+   * worse than a crash.
+   *
+   * THE TWO MECHANISMS, AND WHY TWO
+   * `tail` serializes every MUTATION, so a save's read-modify-write is never
+   * interleaved with another save's, delete's, or clear's. Order is the order the
+   * app called the methods in, so a save made before a clear is deleted by that
+   * clear, and a save made after it survives. That is the intuitive rule and the
+   * one callers already assume.
+   *
+   * `storedEpoch` guards READS. Reads are deliberately NOT queued, so a slow or
+   * hung `getItem` cannot stall the recording of a finished session; a read is
+   * only a snapshot for the caller, and a slightly stale snapshot is harmless.
+   * What is not harmless is a stale read PUBLISHING its answer. So a read notes
+   * the epoch it was issued under and refuses to touch the cache if a mutation
+   * has landed since. Queueing the mutations also means a mutation's own read
+   * always sees a current epoch, so the guard costs those reads nothing.
+   */
+  let storedEpoch = 0;
+
+  /** Resolves only after every mutation queued so far has settled. */
+  let tail: Promise<void> = Promise.resolve();
+
+  /**
+   * Runs `task` once every previously queued mutation has settled.
+   *
+   * The chain is reassigned to a promise that swallows its own outcome, so one
+   * rejected operation cannot wedge the queue for the rest of the process; the
+   * caller still receives the rejection from the promise returned here.
+   */
+  function enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const result = tail.then(task);
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
   async function read(): Promise<SessionRecord[]> {
     if (cache !== null) return cache;
+    const issuedAt = storedEpoch;
     let raw: string | null = null;
     try {
       raw = await store.getItem(SESSION_HISTORY_KEY);
@@ -402,9 +464,28 @@ export function createSessionStore(store: KeyValueStore): SessionStore {
       // `null` so the next call retries the storage instead of serving this empty
       // list for the rest of the process, and `readFailed` records that nothing
       // has actually been read yet so `write()` knows it must not overwrite it.
+      //
+      // Unless a mutation has landed since, in which case this answer is about a
+      // history that no longer exists and must be discarded rather than recorded
+      // as a failure: a clear that already removed the key is exactly the case
+      // where the next save is entitled to write.
+      if (issuedAt !== storedEpoch) return cache ?? [];
       readFailed = true;
       return [];
     }
+    /*
+     * The epoch is re-checked before the result is published, which is the whole
+     * point. A read that was in flight across a clear must not repopulate the
+     * cache with the deleted records, and a read that was in flight across a save
+     * must not overwrite the cache with the pre-save list, because the next save
+     * would merge into that stale list and drop the session just written.
+     *
+     * Falling back to the cache is safe precisely because the mutation that moved
+     * the epoch is what populated it: a clear sets it to `[]`, and a write sets it
+     * to what it just stored. If neither happened, the cache is still `null` and
+     * the honest answer is the empty list.
+     */
+    if (issuedAt !== storedEpoch) return cache ?? [];
     cache = parseSessionHistory(raw);
     readFailed = false;
     return cache;
@@ -425,17 +506,30 @@ export function createSessionStore(store: KeyValueStore): SessionStore {
       throw new Error('session history could not be read; refusing to overwrite it');
     }
     const sorted = sortNewestFirst(records).slice(0, MAX_SAVED_SESSIONS);
+    // Bumped before the write reaches storage, not after, so a read that settles
+    // while `setItem` is still pending is already known to be describing the
+    // pre-write history. That also covers the case where this write fails: the
+    // cache is then still the last known-good list, and a read landing now would
+    // be free to clobber it with something older.
+    storedEpoch += 1;
     await store.setItem(SESSION_HISTORY_KEY, JSON.stringify(sorted));
     cache = sorted;
   }
 
   return {
-    async saveSession(record) {
-      const existing = await read();
-      const without = existing.filter((entry) => entry.id !== record.id);
-      const next = sortNewestFirst([...without, record]);
-      await write(next);
-      return record;
+    /*
+     * Inside the queue, so this save's read-modify-write cannot interleave with
+     * another one's. Without it, two sessions finished at once could each read the
+     * same list and each write a list that knew nothing of the other.
+     */
+    saveSession(record) {
+      return enqueue(async () => {
+        const existing = await read();
+        const without = existing.filter((entry) => entry.id !== record.id);
+        const next = sortNewestFirst([...without, record]);
+        await write(next);
+        return record;
+      });
     },
 
     async getSessions() {
@@ -446,12 +540,14 @@ export function createSessionStore(store: KeyValueStore): SessionStore {
       return (await read()).find((entry) => entry.id === id) ?? null;
     },
 
-    async deleteSession(id) {
-      const existing = await read();
-      const next = existing.filter((entry) => entry.id !== id);
-      if (next.length === existing.length) return false;
-      await write(next);
-      return true;
+    deleteSession(id) {
+      return enqueue(async () => {
+        const existing = await read();
+        const next = existing.filter((entry) => entry.id !== id);
+        if (next.length === existing.length) return false;
+        await write(next);
+        return true;
+      });
     },
 
     /*
@@ -477,11 +573,28 @@ export function createSessionStore(store: KeyValueStore): SessionStore {
      * in. The exercise session screen absorbs a save rejection, so the next
      * session the user finished showed a result screen and then silently left no
      * trace in their history, with nothing to tell them why.
+     *
+     * QUEUED, AND THE ORDERING RULE FOR save + clear
+     * ----------------------------------------------
+     * A clear is queued like any other mutation, so the two of them take effect in
+     * the order the app called them: a `saveSession` awaited (or merely issued)
+     * before `clearSessions` is erased by that clear, and one issued after it
+     * survives. Interleaving them would leave the outcome up to whichever storage
+     * write happened to land last, which is not a rule a caller could reason about.
+     *
+     * The epoch is bumped BEFORE the key is removed rather than after. A read that
+     * settles while `removeItem` is still pending is already describing a history
+     * the user has asked to delete, and must not be able to publish it - and
+     * because a clear sets the cache to `[]` itself, nothing legitimate is lost by
+     * invalidating that early: every later save still reads and writes normally.
      */
-    async clearSessions() {
-      await store.removeItem(SESSION_HISTORY_KEY);
-      cache = [];
-      readFailed = false;
+    clearSessions() {
+      return enqueue(async () => {
+        storedEpoch += 1;
+        await store.removeItem(SESSION_HISTORY_KEY);
+        cache = [];
+        readFailed = false;
+      });
     },
   };
 }

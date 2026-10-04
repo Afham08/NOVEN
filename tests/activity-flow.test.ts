@@ -556,12 +556,24 @@ check(
     const screen = stripComments(readComponent('guided', 'guided-activity-screen.tsx'));
     const result = stripComments(read('activity-result.tsx'));
 
-    check('the guided screen waits for the write instead of discarding it', /await sessionStore\.saveSession\(record\)/.test(screen), screen);
+    /*
+     * The write is now awaited inside `finishOwnedSession`, which is what makes
+     * the await safe: it re-checks that this completion still owns the screen
+     * before navigating. The invariant these checks protect is unchanged - the
+     * screen waits for the write, does not fire it away, and passes the real
+     * outcome on - but the shape is "hand the write to the owner" rather than
+     * "await it here and assign a flag". `completion-ownership.test.ts` covers
+     * the new boundary behaviourally.
+     */
+    check(
+      'the guided screen waits for the write instead of discarding it',
+      /await finishOwnedSession\(\{/.test(screen) && /save: \(\) => sessionStore\.saveSession\(record\)/.test(screen),
+      screen,
+    );
     check('it no longer fires the write away and swallows it', !/void sessionStore\.saveSession/.test(screen), screen);
     check(
       'the write outcome becomes the status it reports',
-      /let saveStatus[^=]*= 'failed'/.test(screen) &&
-        /await sessionStore\.saveSession\(record\);\s*saveStatus = 'saved'/.test(screen),
+      /const saveStatus: SaveStatus = saved \? 'saved' : 'failed'/.test(screen),
       screen,
     );
     check('it passes that outcome to the result screen', /saved: saveStatus/.test(screen), screen);
