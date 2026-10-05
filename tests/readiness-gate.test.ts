@@ -70,9 +70,10 @@ function ankleFor(hip: XY, knee: XY, angleDeg: number): XY {
 function makePose(
   leftAngle: number,
   rightAngle: number,
-  opts: { visibility?: number; omit?: PoseLandmarkName[]; nan?: PoseLandmarkName[] } = {},
+  opts: { visibility?: number; presence?: number; omit?: PoseLandmarkName[]; nan?: PoseLandmarkName[] } = {},
 ): LandmarkEventPayload[] {
   const visibility = opts.visibility ?? 1;
+  const presence = opts.presence ?? 1;
   const omit = new Set(opts.omit ?? []);
   const nan = new Set(opts.nan ?? []);
   const landmarks: LandmarkEventPayload[] = [];
@@ -96,6 +97,7 @@ function makePose(
         y: broken ? Number.NaN : point.y,
         z: 0,
         visibility,
+        presence
       });
     }
   }
@@ -290,10 +292,22 @@ export function run(): void {
     const session = new GatedSession();
     const broken = makePose(90, 90, { nan: ['LEFT_KNEE'] });
     for (let i = 0; i < 15; i += 1) session.feed(broken, i * 125);
-    check('NaN joint never grants readiness', session.gate.currentPhase !== 'ready');
+    // A NaN coordinate on ONE side makes that side unusable, but the other side
+    // is still a measurement, so it carries readiness on its own. A NaN point is
+    // never itself allowed to decide anything.
+    check('readiness rests on the intact side, never on the NaN side', session.gate.currentPhase === 'ready');
     check('no crash, no fake reps', session.reps === 0);
     for (let i = 0; i < 12; i += 1) session.feed(STILL, 3000 + i * 125);
-    check('recovers once coordinates are finite', session.gate.currentPhase === 'ready');
+    check('still ready once coordinates are finite', session.gate.currentPhase === 'ready');
+
+    // When BOTH sides carry NaN coordinates there is no trustworthy geometry at
+    // all, so readiness must be refused rather than guessed.
+    const bothSides = new GatedSession();
+    const bothBroken = makePose(90, 90, { nan: ['LEFT_KNEE', 'RIGHT_KNEE'] });
+    for (let i = 0; i < 15; i += 1) bothSides.feed(bothBroken, i * 125);
+    check('no trustworthy side never grants readiness', bothSides.gate.currentPhase !== 'ready');
+    for (let i = 0; i < 12; i += 1) bothSides.feed(STILL, 3000 + i * 125);
+    check('recovers once coordinates are finite', bothSides.gate.currentPhase === 'ready');
   });
 
   suite('readiness: counted reps survive a tracking loss', () => {
@@ -307,13 +321,23 @@ export function run(): void {
     check('first rep preserved and a second one added', session.reps === 2);
   });
 
-  suite('readiness: missing required joint blocks readiness', () => {
+  suite('readiness: one missing joint does not block the other side', () => {
     const session = new GatedSession();
     const missingAnkle = makePose(90, 90, { omit: ['LEFT_ANKLE'] });
     for (let i = 0; i < 15; i += 1) session.feed(missingAnkle, i * 125);
-    check('missing joint never grants readiness', session.gate.currentPhase !== 'ready');
+    // A hidden far leg is the normal side-view case, so it must not veto
+    // readiness; the near side is a complete observation and is enough.
+    check('the intact side grants readiness', session.gate.currentPhase === 'ready');
     for (let i = 0; i < 12; i += 1) session.feed(STILL, 3000 + i * 125);
     check('full joint set grants readiness', session.gate.currentPhase === 'ready');
+
+    // Losing the near side too leaves nothing trustworthy, and then readiness
+    // is genuinely unavailable.
+    const bothSides = new GatedSession();
+    const bothAnkles = makePose(90, 90, { omit: ['LEFT_ANKLE', 'RIGHT_ANKLE'] });
+    for (let i = 0; i < 15; i += 1) bothSides.feed(bothAnkles, i * 125);
+    check('no trustworthy side never grants readiness', bothSides.gate.currentPhase !== 'ready');
+    check('no reps without a trustworthy side', bothSides.reps === 0);
   });
 
   suite('readiness: rep movement does not demote a ready gate', () => {
@@ -373,7 +397,7 @@ export function run(): void {
     check('gate ready before the approach', session.gate.currentPhase === 'ready');
 
     // A deliberate stroll: 0.02/frame, i.e. never breaches the 0.04 per-frame
-    // drift limit, but the hips climb 0.30 of the frame — far past
+    // drift limit, but the hips climb 0.30 of the frame Î“Ã‡Ã¶ far past
     // maxAnchorOffset. Per-frame drift alone would let this through.
     let ts = 2000;
     let caughtAt = 0;
@@ -507,3 +531,18 @@ export function run(): void {
     check('no reps during the post-start stabilization', session.reps === 0);
   });
 }
+  suite('readiness trust policy: unilateral occlusion does not veto seated readiness', () => {
+    const engine = new (require('../src/exercise/session-engine').SessionEngine)(require('../src/exercise/configs').SEATED_KNEE_EXTENSION);
+    let t = 0;
+    const base = makePose(90, 90, { visibility: 0.95, presence: 0.95 });
+    const occluded = base.map((landmark) => {
+      if (landmark.name === 'RIGHT_ANKLE') {
+        return { ...landmark, visibility: 0.4, presence: 0.2 };
+      }
+      return landmark;
+    });
+    for (let i = 0; i < 12; i += 1) {
+      engine.handlePoseFrame({ nativeEvent: { timestampMs: t += 125, presence: 'tracked', landmarks: occluded } });
+    }
+    check('ready despite one untrustworthy ankle', engine.readinessPhase === 'ready');
+  });

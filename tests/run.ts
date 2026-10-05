@@ -9,6 +9,7 @@ import { run as runCompletionOwnership } from './completion-ownership.test';
 import { run as runExerciseLibrary } from './exercise-library.test';
 import { run as runGuidedCompletion } from './guided-completion.test';
 import { run as runHistoryFormat } from './history-format.test';
+import { run as runLandmarkTrust } from './landmark-trust.test';
 import { run as runMeditationAudio } from './meditation-audio.test';
 import { run as runMeditationAudioRace } from './meditation-audio-race.test';
 import { run as runMetrics } from './metrics.test';
@@ -40,6 +41,7 @@ async function main(): Promise<void> {
   runExerciseLibrary();
   runGuidedCompletion();
   runHistoryFormat();
+  runLandmarkTrust();
   runMetrics();
   runMeditationGuidance();
   runMeditationAudio();

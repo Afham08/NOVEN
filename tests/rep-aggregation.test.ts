@@ -105,7 +105,7 @@ function sideViewPose(spec: Record<Side, AngleSpec>, opts: PoseOpts = {}): Landm
     ] as const) {
       if (omit.has(name)) continue;
       const broken = nan.has(name);
-      out.push({ name, x: broken ? Number.NaN : p.x, y: broken ? Number.NaN : p.y, z: 0, visibility });
+      out.push({ name, x: broken ? Number.NaN : p.x, y: broken ? Number.NaN : p.y, z: 0, visibility, presence: 1 });
     }
   }
   return out;
@@ -475,15 +475,31 @@ export function run(): void {
   });
 
   suite('aggregation: invalid landmarks cannot complete a rep', () => {
+    // The broken leg itself can never complete a rep: with no usable angle there
+    // is nothing for its detector to see, whatever the other leg does.
     const engine = new SessionEngine(SEATED_KNEE_EXTENSION);
     let t = reachReady(engine);
     for (const angle of REP) {
       engine.handlePoseFrame(
-        frame(sideViewPose({ left: angle, right: 'aliased' }, { nan: ['LEFT_ANKLE'] }), t),
+        frame(sideViewPose({ left: angle, right: REST }, { nan: ['LEFT_ANKLE'] }), t),
       );
       t += 100;
     }
     check('a NaN frame on the moving leg counts nothing', engine.reps === 0, engine.reps);
+
+    // Same defect with the far leg aliased, so the far leg's landmarks track the
+    // near leg's. That side is fully readable, so it may legitimately report the
+    // movement; what must never happen is the broken leg adding a SECOND rep for
+    // the one physical extension.
+    const aliased = new SessionEngine(SEATED_KNEE_EXTENSION);
+    let at = reachReady(aliased);
+    for (const angle of REP) {
+      aliased.handlePoseFrame(
+        frame(sideViewPose({ left: angle, right: 'aliased' }, { nan: ['LEFT_ANKLE'] }), at),
+      );
+      at += 100;
+    }
+    check('the broken leg never doubles the rep', aliased.reps === 1, aliased.reps);
   });
 
   suite('aggregation: low visibility cannot complete a rep', () => {

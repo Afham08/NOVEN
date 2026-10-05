@@ -861,7 +861,7 @@ export function run(): void {
       const names = REP_SIDE_NAMES[side];
       const ankle = ankleFor(hip, knee, angle);
       for (const [name, point] of [[names.hip, hip], [names.knee, knee], [names.ankle, ankle]] as const) {
-        landmarks.push({ name, x: point.x, y: point.y, z: 0, visibility: 1 });
+        landmarks.push({ name, x: point.x, y: point.y, z: 0, visibility: 1, presence: 1 });
       }
     }
     return landmarks;

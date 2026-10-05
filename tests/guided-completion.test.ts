@@ -77,7 +77,7 @@ function reps(title: string, seconds: number, targetReps: number): GuidedStep {
 
 /** A landmark in the shape the pose tracker reports. */
 function lm(name: PoseLandmarkName, x: number, y: number): LandmarkEventPayload {
-  return { name, x, y, z: 0, visibility: 1 };
+  return { name, x, y, z: 0, visibility: 1, presence: 1 };
 }
 
 /** Shoulder and hip pairs, which every pose needs and which define the torso. */

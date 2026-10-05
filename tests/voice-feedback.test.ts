@@ -1016,7 +1016,7 @@ function pose(
     const names = SIDE_NAMES[side];
     const ankle = ankleFor(hip, knee, side === 'left' ? leftAngle : rightAngle);
     for (const [name, point] of [[names.hip, hip], [names.knee, knee], [names.ankle, ankle]] as const) {
-      landmarks.push({ name, x: point.x, y: point.y, z: 0, visibility });
+      landmarks.push({ name, x: point.x, y: point.y, z: 0, visibility, presence: 1 });
     }
   }
   return landmarks;

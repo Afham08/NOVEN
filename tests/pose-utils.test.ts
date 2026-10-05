@@ -17,8 +17,9 @@ function lm(
   x: number,
   y: number,
   visibility = 1,
+  presence = 1,
 ): LandmarkEventPayload {
-  return { name, x, y, z: 0, visibility };
+  return { name, x, y, z: 0, visibility, presence };
 }
 
 const LEFT_TRIPLET: AngleTriplet = SEATED_KNEE_EXTENSION.triplets.left;

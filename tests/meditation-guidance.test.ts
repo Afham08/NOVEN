@@ -26,7 +26,7 @@ function lm(
   y: number,
   visibility = 1,
 ): LandmarkEventPayload {
-  return { name, x, y, z: 0, visibility };
+  return { name, x, y, z: 0, visibility, presence: 1 };
 }
 
 /**

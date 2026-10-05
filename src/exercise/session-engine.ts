@@ -1,8 +1,10 @@
 import type { LandmarkEventPayload, PoseFrameEventPayload } from '../../modules/pose-tracker';
 
 import { PositiveFeedbackLatch, pausedFeedback, phaseFeedback, presenceFeedback, priorityPhase, readinessFeedback, setupFeedback, type FeedbackCue } from './feedback';
+import { isTrustedSide } from './landmark-trust';
 import { angleFromTriplet } from './pose-utils';
 import { RepDetector } from './rep-detector';
+import { createDiagnostics, readinessDiagnostics, readinessDiagnosticsEnabled } from './readiness-diagnostics';
 import { ReadinessGate, type ReadinessPhase } from './stabilize';
 import type { ExerciseConfig, Side } from './types';
 
@@ -74,6 +76,8 @@ export class SessionEngine {
   private countedRanges: number[] = [];
   /** Timestamp of the last COUNTED rep; drives the session-scoped cooldown. */
   private lastCountedAtMs: number | null = null;
+  /** TEMPORARY: rate-limit state for the device readiness trace. */
+  private readonly diagnostics = createDiagnostics();
 
   constructor(private readonly config: ExerciseConfig) {
     this.detectors = {
@@ -195,6 +199,7 @@ export class SessionEngine {
       left.freeze();
       right.freeze();
       this.latch.clear();
+      this.traceReadiness(landmarks, timestampMs, outcome);
       return this.emit(readinessFeedback(this.gate.currentPhase));
     }
 
@@ -202,6 +207,7 @@ export class SessionEngine {
       left.freeze();
       right.freeze();
       this.latch.clear();
+      this.traceReadiness(landmarks, timestampMs, outcome);
       return this.emit(readinessFeedback(this.gate.currentPhase));
     }
 
@@ -232,7 +238,33 @@ export class SessionEngine {
     // cannot fabricate a count or an impossible pace.
     const repPhase = priorityPhase(left.currentPhase, right.currentPhase);
     const celebrating = this.latch.observe(repPhase, repCompletedThisFrame);
+    this.traceReadiness(landmarks, timestampMs, outcome);
     return this.emit(phaseFeedback(repPhase, celebrating, this.config.id), repCompletedThisFrame);
+  }
+
+  /**
+   * TEMPORARY: emits the sampled `[NOVEN-READINESS]` device trace.
+   *
+   * Pure observation — it reads state and logs it, and returns nothing the
+   * pipeline uses. Enabled only in a DEV bundle, so release builds do no
+   * per-frame work. See `readiness-diagnostics.ts` for the fields and the rate
+   * limit.
+   */
+  private traceReadiness(
+    landmarks: LandmarkEventPayload[],
+    timestampMs: number,
+    outcome: { phase: ReadinessPhase; becameReady: boolean },
+  ): void {
+    if (!readinessDiagnosticsEnabled()) return;
+    const line = readinessDiagnostics(
+      this.config,
+      landmarks,
+      timestampMs,
+      this.diagnostics,
+      outcome.phase,
+      outcome.becameReady,
+    );
+    if (line !== null) console.log(line);
   }
 
   /**
@@ -291,22 +323,45 @@ export class SessionEngine {
   }
 
   /**
-   * Whether the tracked joints are inside the exercise's rest regime, i.e. at
-   * least one tracked side's angle is at or below `thresholds.bentAngleDeg` —
-   * the boundary the config already defines as "bent / at rest". No new number
-   * is introduced, and nothing here refers to a particular exercise.
+   * Whether the tracked joints are inside the exercise's rest regime at the
+   * moment readiness would be granted.
    *
-   * AT LEAST ONE side is required rather than all of them on purpose. In the
-   * side view this app uses, the far leg is occluded and its landmarks are
-   * model-inferred, so demanding every side would let one bad inference suppress
-   * counting altogether — trading an occasional false rep for permanently missed
-   * reps. A standing person fails the test on BOTH sides (a straight leg reads
-   * ~174deg), so the tolerance costs nothing here.
+   * The key change: posture is judged ONLY over sides that are TRUSTWORTHY
+   * (all three landmarks present, finite, visible and present enough to be an
+   * observation, not an inference). An unreliable side must be ignored — it may
+   * neither veto readiness nor grant it.
+   *
+   * Rules:
+   *  - If no trustworthy side exists, posture is not satisfied (we have no
+   *    reliable evidence of the starting position).
+   *  - If exactly one trustworthy side exists, that side alone determines
+   *    readiness (prevents a dim far ankle from permanently vetoing).
+   *  - If two (or more) trustworthy sides exist, BOTH must satisfy the rest
+   *    posture (prevents a badly-inferred standing side from accepting a
+   *    standing pose).
+   *
+   * `bentAngleDeg` is the boundary the config already defines as "bent/at rest";
+   * no new threshold is introduced.
    */
   private restingPostureSatisfied(landmarks: LandmarkEventPayload[]): boolean {
     if (!this.config.readiness.requireRestingPosture) return true;
     const { minVisibility, bentAngleDeg } = this.config.thresholds;
-    return this.config.sides.some((side) => {
+    const trustworthySides: Side[] = [];
+
+    for (const side of this.config.sides) {
+      const triplet = this.config.triplets[side];
+      const required = [triplet.hip, triplet.knee, triplet.ankle];
+      if (isTrustedSide(landmarks, required, minVisibility)) {
+        trustworthySides.push(side);
+      }
+    }
+
+    if (trustworthySides.length === 0) {
+      return false;
+    }
+
+    // Every trustworthy side must satisfy the resting posture.
+    return trustworthySides.every((side) => {
       const angle = angleFromTriplet(landmarks, this.config.triplets[side], minVisibility);
       return Number.isFinite(angle) && angle <= bentAngleDeg;
     });
