@@ -51,8 +51,34 @@ export function Button({
   const theme = useTheme();
 
   const filled = variant === 'primary' || variant === 'secondary';
-  const background = variant === 'primary' ? theme.accent : theme.accentSecondary;
-  const foreground = filled ? theme.onAccent : variant === 'outline' ? theme.accent : theme.accentSecondary;
+
+  /*
+   * A filled control is the thing being looked at, so it carries its own
+   * background. `ghost` and `outline` are not that: they sit on a card and let
+   * the card's own surface show through, which is why they take no colour at
+   * all rather than a pale one.
+   *
+   * This is what was wrong before, and it was invisible rather than ugly. Both
+   * bare variants fell through to `theme.accentSecondary` for their background
+   * AND their text, so a ghost label was painted teal on teal — a 1:1 label,
+   * present in the tree and unreadable on screen. It survived review because
+   * `accessibilityLabel` is still the title, so a screen reader read the row
+   * perfectly while a sighted person saw a blank bar.
+   *
+   * The two treatments now differ in exactly the way their names promise: ghost
+   * is a bare label in the ordinary text colour, and outline additionally draws
+   * a border so it still reads as a control when it is not filled.
+   */
+  const background = filled
+    ? variant === 'primary'
+      ? theme.accent
+      : theme.accentSecondary
+    : 'transparent';
+  const foreground = filled
+    ? theme.onAccent
+    : variant === 'outline'
+      ? theme.accent
+      : theme.text;
   const border = variant === 'outline' ? { borderWidth: 1.5, borderColor: theme.accent } : undefined;
 
   return (

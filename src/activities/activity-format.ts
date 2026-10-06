@@ -1,5 +1,6 @@
 import type { SessionRecord } from '../exercise/session-store';
 import { findGuidedActivity } from './catalog';
+import type { GuidedActivity } from './types';
 
 /**
  * ============================================================================
@@ -42,6 +43,19 @@ export function describeLength(seconds: number): string {
   const minutes = Math.floor(whole / 60);
   const rest = whole % 60;
   return rest === 0 ? `${minutes} min` : `${minutes} min ${rest} sec`;
+}
+
+/**
+ * The one factual line a routine's card carries: how long it runs, and how many
+ * of its steps there are.
+ *
+ * Both numbers are read from the catalogue entry, so a routine that is edited in
+ * one place cannot go on promising a length it no longer has. The steps are
+ * named with the activity's own `progressNoun`, so a yoga routine counts poses
+ * and never quietly becomes "6 steps".
+ */
+export function describeRoutineMeta(activity: GuidedActivity): string {
+  return `${describeLength(activity.durationSeconds)} · ${activity.steps.length} ${activity.progressNoun}`;
 }
 
 /**

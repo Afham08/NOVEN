@@ -3,6 +3,7 @@ import { check, suite } from './harness';
 
 import { SEATED_KNEE_EXTENSION } from '../src/exercise/configs';
 import { phaseFeedback, PositiveFeedbackLatch, priorityPhase, readinessFeedback } from '../src/exercise/feedback';
+import { SIT_TO_STAND } from '../src/exercise/pose-configs';
 import { SessionEngine } from '../src/exercise/session-engine';
 import type { Side } from '../src/exercise/types';
 
@@ -40,9 +41,18 @@ function ankleFor(hip: XY, knee: XY, angleDeg: number): XY {
 function pose(
   leftAngle: number,
   rightAngle: number,
-  opts: { visibility?: number; omit?: PoseLandmarkName[]; nan?: PoseLandmarkName[]; bodyY?: number } = {},
+  opts: {
+    visibility?: number;
+    rightVisibility?: number;
+    presence?: number;
+    rightPresence?: number;
+    omit?: PoseLandmarkName[];
+    nan?: PoseLandmarkName[];
+    bodyY?: number;
+  } = {},
 ): LandmarkEventPayload[] {
   const visibility = opts.visibility ?? 1;
+  const presence = opts.presence ?? 1;
   const omit = new Set(opts.omit ?? []);
   const nan = new Set(opts.nan ?? []);
   // Shifts the whole body vertically without changing any joint angle, so a
@@ -54,6 +64,10 @@ function pose(
     const { hip, knee } = SIDE_GEOMETRY[side];
     const names = SIDE_NAMES[side];
     const ankle = ankleFor(hip, knee, side === 'left' ? leftAngle : rightAngle);
+    // Per-side scores let a test dim or un-present exactly one side, which is
+    // how "the far leg is inferred, the near leg is observed" is expressed.
+    const sideVisibility = side === 'right' ? (opts.rightVisibility ?? visibility) : visibility;
+    const sidePresence = side === 'right' ? (opts.rightPresence ?? presence) : presence;
     for (const [name, point] of [[names.hip, hip], [names.knee, knee], [names.ankle, ankle]] as const) {
       if (omit.has(name)) continue;
       const broken = nan.has(name);
@@ -62,7 +76,8 @@ function pose(
         x: broken ? Number.NaN : point.x,
         y: broken ? Number.NaN : point.y + dy,
         z: 0,
-        visibility,
+        visibility: sideVisibility,
+        presence: sidePresence,
       });
     }
   }
@@ -173,12 +188,13 @@ export function run(): void {
   });
 
   suite('pipeline B/C/D: invalid or invisible landmarks never count a rep', () => {
+    // Only a defect that makes EVERY side unusable can suspend the gate. With
+    // nothing trustworthy there is no geometry left to measure, so this stays
+    // all-or-nothing exactly as before.
     const cases: { name: string; opts: Parameters<typeof pose>[2] }[] = [
-      { name: 'missing left ankle', opts: { omit: ['LEFT_ANKLE'] } },
-      { name: 'missing right knee', opts: { omit: ['RIGHT_KNEE'] } },
       { name: 'missing both hips', opts: { omit: ['LEFT_HIP', 'RIGHT_HIP'] } },
-      { name: 'NaN left ankle', opts: { nan: ['LEFT_ANKLE'] } },
-      { name: 'NaN right hip', opts: { nan: ['RIGHT_HIP'] } },
+      { name: 'missing both ankles', opts: { omit: ['LEFT_ANKLE', 'RIGHT_ANKLE'] } },
+      { name: 'NaN both knees', opts: { nan: ['LEFT_KNEE', 'RIGHT_KNEE'] } },
     ];
 
     for (const testCase of cases) {
@@ -195,7 +211,8 @@ export function run(): void {
       check(`${testCase.name}: gate suspended`, engine.readinessPhase === 'waiting');
     }
 
-    // Low visibility: below minVisibility (0.4) the joints are unusable.
+    // Low visibility: below minVisibility (0.4) the joints are unusable. Both
+    // sides are dim at once, so no side is trustworthy and counting stops.
     const dim = new SessionEngine(SEATED_KNEE_EXTENSION);
     let dt = reachReady(dim);
     check('low-visibility: gate ready first', dim.readinessPhase === 'ready');
@@ -204,15 +221,75 @@ export function run(): void {
       dt += 100;
     }
     check('low visibility never counts a rep', dim.reps === 0);
+    check('low visibility suspends counting', dim.readinessPhase === 'waiting');
 
     // A single corrupt frame in the middle of a real rep must not break it.
     const glitch = new SessionEngine(SEATED_KNEE_EXTENSION);
     let gt = reachReady(glitch);
     for (const angle of REP_CADENCE) {
       glitch.handlePoseFrame(frame(pose(angle, REST, gt % 200 === 0 ? { nan: ['LEFT_ANKLE'] } : {}), gt));
-      gt += 100;
+      gt += 1 * 100;
     }
     check('a NaN frame mid-rep prevents that rep', glitch.reps === 0);
+  });
+
+  suite('pipeline: an unreadable far side cannot veto a readable near side', () => {
+    // The far leg is hidden behind the near leg in a side view, so MediaPipe
+    // reports it as inferred rather than observed. That is the normal case, and
+    // it must neither suspend the gate nor block the near side's rep.
+    const farSideDefects: { name: string; opts: Parameters<typeof pose>[2] }[] = [
+      { name: 'missing far ankle', opts: { omit: ['RIGHT_ANKLE'] } },
+      { name: 'missing far knee', opts: { omit: ['RIGHT_KNEE'] } },
+      { name: 'NaN far hip', opts: { nan: ['RIGHT_HIP'] } },
+      { name: 'missing far hip', opts: { omit: ['RIGHT_HIP'] } },
+    ];
+
+    for (const testCase of farSideDefects) {
+      const engine = new SessionEngine(SEATED_KNEE_EXTENSION);
+      let t = reachReady(engine);
+      check(`${testCase.name}: gate ready first`, engine.readinessPhase === 'ready');
+
+      // A full left-leg rep while the far side stays unreadable throughout.
+      for (const angle of REP_CADENCE) {
+        engine.handlePoseFrame(frame(pose(angle, REST, testCase.opts), t));
+        t += 100;
+      }
+      check(`${testCase.name}: near-side rep still counts`, engine.reps === 1);
+      check(`${testCase.name}: gate stays ready`, engine.readinessPhase === 'ready');
+    }
+
+    // The mirror image: the NEAR side is the broken one. Readiness survives on
+    // the far side, but the broken side's own angle is unusable, so its rep
+    // cannot be counted and nothing is invented from the missing joint.
+    const nearBroken = new SessionEngine(SEATED_KNEE_EXTENSION);
+    let nt = reachReady(nearBroken);
+    for (const angle of REP_CADENCE) {
+      nearBroken.handlePoseFrame(frame(pose(angle, REST, { omit: ['LEFT_ANKLE'] }), nt));
+      nt += 100;
+    }
+    check('near-side defect: no rep from the unusable leg', nearBroken.reps === 0);
+    check('near-side defect: far side still keeps the gate ready', nearBroken.readinessPhase === 'ready');
+
+    // Presence is the other half of the trust decision: a landmark the model
+    // projects but does not actually see is an inference, not an observation.
+    const inferred = new SessionEngine(SEATED_KNEE_EXTENSION);
+    let pt = reachReady(inferred);
+    for (const angle of REP_CADENCE) {
+      inferred.handlePoseFrame(frame(pose(angle, REST, { presence: 0.1 }), pt));
+      pt += 100;
+    }
+    check('absent presence never counts a rep', inferred.reps === 0);
+    check('absent presence suspends counting', inferred.readinessPhase === 'waiting');
+
+    // ...and only ONE side inferred still leaves the other side usable.
+    const oneInferred = new SessionEngine(SEATED_KNEE_EXTENSION);
+    let ot = reachReady(oneInferred);
+    for (const angle of REP_CADENCE) {
+      oneInferred.handlePoseFrame(frame(pose(angle, REST, { rightPresence: 0.1 }), ot));
+      ot += 100;
+    }
+    check('one inferred side: near-side rep still counts', oneInferred.reps === 1);
+    check('one inferred side: gate stays ready', oneInferred.readinessPhase === 'ready');
   });
 
   suite('pipeline G: a tracking stall cannot join frames into a rep', () => {
@@ -352,15 +429,68 @@ export function run(): void {
     check('same phase yields the same tone', a.tone === b.tone);
 
     check('rest reads as ready', phaseFeedback('rest', false).text === 'Ready');
-    check('extending instructs', phaseFeedback('extending', false).text === 'Extend your knee');
-    check('extended confirms', phaseFeedback('extended', false).text === 'Keep it straight');
-    check('returning instructs', phaseFeedback('returning', false).text === 'Return slowly');
+    // The knee wording is tied to the movement it describes, not to the phase.
+    check(
+      'extending instructs, for the knee movement',
+      phaseFeedback('extending', false, 'seated-knee-extension').text === 'Extend your knee',
+    );
+    check(
+      'extended confirms, for the knee movement',
+      phaseFeedback('extended', false, 'seated-knee-extension').text === 'Keep it straight',
+    );
+    check(
+      'returning instructs, for the knee movement',
+      phaseFeedback('returning', false, 'seated-knee-extension').text === 'Return slowly',
+    );
     check('completion praises', phaseFeedback('rest', true).text === 'Good movement');
     check('praise tone is positive', phaseFeedback('rest', true).tone === 'sage');
 
     check('waiting asks for position', readinessFeedback('waiting').text === 'Get into position');
     check('stabilizing asks for stillness', readinessFeedback('stabilizing').text === 'Get ready');
     check('ready confirms', readinessFeedback('ready').text === 'Ready');
+  });
+
+  /**
+   * Drives one full out-and-back cycle and records what the HUD was told.
+   * Returns the distinct texts in the order they first appeared.
+   */
+  function coachingFor(config: typeof SEATED_KNEE_EXTENSION): string[] {
+    const engine = new SessionEngine(config);
+    let t = reachReady(engine);
+    const seen: string[] = [];
+    for (const angle of [120, 140, 160, 176, 176, 160, 140, 120, REST, REST]) {
+      const out = engine.handlePoseFrame(frame(pose(angle, angle), t));
+      if (!seen.includes(out.feedback.text)) seen.push(out.feedback.text);
+      t += 100;
+    }
+    return seen;
+  }
+
+  suite('feedback: the engine words the cue for the movement it was built with', () => {
+    /*
+     * The wording lookup is only worth anything if the movement actually reaches
+     * it. Two engines are driven with byte-identical synthetic frames and differ
+     * only in their config, which is exactly the substitution the guided screen
+     * makes when it resolves a step's cameraConfigId.
+     */
+    const knee = coachingFor(SEATED_KNEE_EXTENSION);
+    const stand = coachingFor(SIT_TO_STAND);
+
+    check('the knee engine coaches the knee', knee.includes('Extend your knee'), knee);
+    check('the knee engine says to keep it straight', knee.includes('Keep it straight'), knee);
+
+    for (const phrase of ['Extend your knee', 'Keep it straight', 'Return slowly']) {
+      check(`a sit-to-stand session never says "${phrase}"`, !stand.includes(phrase), stand);
+    }
+    check('the sit-to-stand engine coaches standing up', stand.includes('Stand up slowly'), stand);
+
+    // Movement wording changed; rep counting and praise did not.
+    check('the knee session still finishes on a counted rep', knee.includes('Good movement'), knee);
+    check('the sit-to-stand session still finishes on a counted rep', stand.includes('Good movement'), stand);
+
+    for (const text of [...knee, ...stand]) {
+      check(`"${text}" is a short phrase`, text.length > 0 && text.length <= 24, text);
+    }
   });
 
   suite('feedback: merged leg phase prefers the active instruction', () => {
@@ -695,11 +825,14 @@ export function run(): void {
       engine.handlePoseFrame(frame(pose(REST, SHIFT_PEAK), t));
       t += 100;
     }
-    check('a straight-reading far leg does not block readiness', engine.readinessPhase === 'ready', engine.readinessPhase);
+    // With both sides trustworthy and posture in disagreement, readiness must not
+    // be granted (standing + seated must never be accepted as the initial seated
+    // starting posture).
+    check('disagreeing trustworthy postures must not grant readiness', engine.readinessPhase !== 'ready', engine.readinessPhase);
 
-    // And a genuine rep on the near leg still counts.
+    // A genuine rep cannot be counted if we never became ready.
     t = doLeftRep(engine, t);
-    check('a real rep still counts', engine.reps === 1, engine.reps);
+    check('no rep counted without readiness', engine.reps === 0, engine.reps);
 
     // Control: the tolerance must not become a hole in the other direction. When
     // BOTH sides read straight the posture is standing, and the gate must refuse

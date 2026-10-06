@@ -2,13 +2,20 @@ import { useFocusEffect } from 'expo-router';
 import { useCallback, useState } from 'react';
 
 import { buildProgress, type ProgressSummary } from '@/exercise/progress';
-import type { SessionStore } from '@/exercise/session-store';
+import type { SessionRecord, SessionStore } from '@/exercise/session-store';
 
 export type ProgressState = {
   /** Null until the first read finishes, so nothing false is shown while loading. */
   summary: ProgressSummary | null;
   /** Every stored session, including any older than the 30-day window. */
   totalSessions: number | null;
+  /**
+   * The same stored sessions the summary was built from, null until the read
+   * lands. Presentational summaries (which exercises, which days) read this
+   * rather than making a second store read, so everything on the screen keeps
+   * agreeing with everything else.
+   */
+  records: SessionRecord[] | null;
 };
 
 /**
@@ -24,16 +31,18 @@ export type ProgressState = {
 export function useProgress(store: SessionStore): ProgressState {
   const [summary, setSummary] = useState<ProgressSummary | null>(null);
   const [totalSessions, setTotalSessions] = useState<number | null>(null);
+  const [records, setRecords] = useState<SessionRecord[] | null>(null);
 
   useFocusEffect(
     useCallback(() => {
       // A read failure resolves to an empty list inside the store, so there is
       // no error branch to handle here: the empty state is the honest answer.
       let active = true;
-      void store.getSessions().then((records) => {
+      void store.getSessions().then((next) => {
         if (!active) return;
-        setSummary(buildProgress(records));
-        setTotalSessions(records.length);
+        setRecords(next);
+        setSummary(buildProgress(next));
+        setTotalSessions(next.length);
       });
       return () => {
         active = false;
@@ -41,5 +50,5 @@ export function useProgress(store: SessionStore): ProgressState {
     }, [store]),
   );
 
-  return { summary, totalSessions };
+  return { summary, totalSessions, records };
 }

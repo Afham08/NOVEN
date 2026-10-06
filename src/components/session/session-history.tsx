@@ -7,6 +7,7 @@ import { Card } from '@/components/ui/card';
 import { Spacing, Type } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { formatDurationLabel, formatPaceLabel } from '@/exercise/metrics';
+import { sessionsForExercise, steadinessLabel, timeOfDayLabel } from '@/exercise/history-format';
 import { dayLabel, type SessionRecord, type SessionStore } from '@/exercise/session-store';
 
 export type SessionHistoryProps = {
@@ -16,12 +17,23 @@ export type SessionHistoryProps = {
    * existing result screen, reusing it unchanged.
    */
   onOpenSession?: (record: SessionRecord) => void;
-  /** How many sessions to show. The full list stays in storage. */
+  /** How many sessions to show before the "Show earlier sessions" control. */
   limit?: number;
+  /**
+   * When set, only this exercise's own sessions are listed — the Exercise
+   * detail screen's "Your sessions" section. The rows, the expand control and
+   * the wording are this same list's; only the selection differs. The
+   * "kept on this device" note still counts the whole history, because what is
+   * stored on the device is every session, not the filtered view.
+   */
+  exerciseId?: string;
 };
 
 /** Most recent sessions shown before the list is cut off. */
 const DEFAULT_LIMIT = 10;
+
+/** How many more rows each press of "Show earlier sessions" reveals. */
+const EXPAND_STEP = 10;
 
 /**
  * "5 exercises completed" / "1 exercise completed" — the same plain phrasing the
@@ -53,9 +65,16 @@ export function describeCompletedCount(reps: number): string {
  * A row is a whole pressable target, because the audience may be tapping with a
  * finger that is not precise.
  */
-export function SessionHistory({ store, onOpenSession, limit = DEFAULT_LIMIT }: SessionHistoryProps) {
+export function SessionHistory({
+  store,
+  onOpenSession,
+  limit = DEFAULT_LIMIT,
+  exerciseId,
+}: SessionHistoryProps) {
   const theme = useTheme();
   const [records, setRecords] = useState<SessionRecord[] | null>(null);
+  /** How many rows are currently revealed; starts at the screen's chosen limit. */
+  const [visibleCount, setVisibleCount] = useState(limit);
 
   /**
    * Read the history whenever the screen regains focus, not only on mount:
@@ -82,19 +101,26 @@ export function SessionHistory({ store, onOpenSession, limit = DEFAULT_LIMIT }: 
   // Not yet read: render nothing rather than a misleading "no sessions yet".
   if (records === null) return null;
 
-  const visible = records.slice(0, Math.max(0, limit));
+  // What this particular list shows: the whole history, or one exercise's own.
+  const listed = exerciseId === undefined ? records : sessionsForExercise(records, exerciseId);
+  const visible = listed.slice(0, Math.max(0, visibleCount));
 
   if (visible.length === 0) {
     return (
       <Card variant="surface" gap={Spacing.two}>
-        <Text style={[styles.emptyTitle, { color: theme.heading }]}>No sessions yet</Text>
+        <Text style={[styles.emptyTitle, { color: theme.heading }]}>
+          {exerciseId === undefined ? 'No sessions yet' : 'No sessions for this exercise yet'}
+        </Text>
         <Text style={[styles.emptyBody, { color: theme.textSecondary }]}>
-          Finish an exercise, a yoga routine, or a calm moment, and it will appear
-          here.
+          {exerciseId === undefined
+            ? 'Finish an exercise, a yoga routine, or a calm moment, and it will appear here.'
+            : 'Finish this exercise and it will appear here.'}
         </Text>
       </Card>
     );
   }
+
+  const hiddenCount = listed.length - visible.length;
 
   return (
     <View style={styles.list}>
@@ -105,6 +131,29 @@ export function SessionHistory({ store, onOpenSession, limit = DEFAULT_LIMIT }: 
           onPress={onOpenSession ? () => onOpenSession(record) : undefined}
         />
       ))}
+
+      {/*
+        The list shows the most recent sessions and offers the rest, instead of
+        cutting off silently. The control sits at the end of the list, reads as a
+        direction rather than a button, and reveals the next block on each press —
+        the reader keeps their place and the list never pretends the older
+        sessions are not there.
+      */}
+      {hiddenCount > 0 ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Show earlier sessions"
+          onPress={() => setVisibleCount((count) => count + EXPAND_STEP)}>
+          <Card variant="sage">
+            <Text style={[styles.moreText, { color: theme.accentSecondary }]}>
+              {hiddenCount === 1 ? 'Show 1 earlier session' : `Show ${hiddenCount} earlier sessions`}
+            </Text>
+          </Card>
+          <Text style={[styles.savedNote, { color: theme.textSecondary }]}>
+            {`All ${records.length} sessions are kept on this device`}
+          </Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }
@@ -118,6 +167,8 @@ function HistoryRow({
 }) {
   const theme = useTheme();
   const day = dayLabel(record.completedAt);
+  const time = timeOfDayLabel(record.completedAt);
+  const steadiness = steadinessLabel(record);
 
   return (
     <Pressable
@@ -147,6 +198,16 @@ function HistoryRow({
         </View>
 
         {/*
+          The time line joins the day label only when both are real, so two
+          sessions on the same day can be told apart. It is rendered after the
+          stats rather than replacing anything: rows that cannot be dated keep
+          the exact shape they always had.
+        */}
+        {time !== null ? (
+          <Text style={[styles.detail, { color: theme.textSecondary }]}>{time}</Text>
+        ) : null}
+
+        {/*
           Pace is only shown when the engine actually measured it. A session too
           short to produce a pace simply does not display one, instead of showing
           a placeholder that reads as a real reading.
@@ -155,6 +216,15 @@ function HistoryRow({
           <Text style={[styles.detail, { color: theme.textSecondary }]}>
             {`Pace ${formatPaceLabel(record.paceRpm)} per minute`}
           </Text>
+        ) : null}
+
+        {/*
+          Steadiness is the one stored fact the list never showed, and it is the
+          fact the 30-day chart above plots. Shown with the same honesty rules as
+          everything else: a session that produced no steadiness shows none.
+        */}
+        {steadiness !== null ? (
+          <Text style={[styles.detail, { color: theme.textSecondary }]}>{steadiness}</Text>
         ) : null}
       </Card>
     </Pressable>
@@ -204,6 +274,18 @@ const styles = StyleSheet.create({
     ...Type.small,
     fontSize: 16,
     lineHeight: 22,
+  },
+  moreText: {
+    ...Type.bodyEmphasis,
+    fontSize: 18,
+    lineHeight: 26,
+  },
+  savedNote: {
+    ...Type.small,
+    fontSize: 14,
+    lineHeight: 20,
+    marginTop: Spacing.two,
+    textAlign: 'center',
   },
   emptyTitle: {
     ...Type.subheading,

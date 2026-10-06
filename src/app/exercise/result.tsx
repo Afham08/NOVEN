@@ -17,6 +17,7 @@ import {
   parseRangeParam,
   parseRepCountParam,
 } from '@/exercise/result-params';
+import { leaveExerciseResult } from '@/exercise/result-exit';
 
 export default function ResultScreen() {
   const { id, reps, duration, pace, range, consistency } = useLocalSearchParams<{
@@ -37,16 +38,21 @@ export default function ResultScreen() {
   const repCount = parseRepCountParam(reps);
 
   /**
-   * Leaving is one-shot. Without this, a double tap (or an impatient repeat)
-   * fires replace() twice, stacking a second /exercise entry and letting the user
-   * navigate Back into this result screen again. The ref flips before the
-   * navigation call, so re-entrant presses within the same frame are ignored.
+   * Leaving is one-shot, so a double tap cannot stack two navigations. The ref
+   * flips before the navigation call, so re-entrant presses within the same frame
+   * are ignored.
+   *
+   * The exit itself lives in `leaveExerciseResult` because it has to POP the
+   * session off the stack rather than replace only this screen: replacing
+   * `/` in place left the completed session underneath Home, where Back could
+   * reopen it. See that module for the stack and why the other exits are left
+   * alone.
    */
   const leavingRef = useRef(false);
   const leave = () => {
     if (leavingRef.current) return;
     leavingRef.current = true;
-    router.replace('/');
+    leaveExerciseResult(router);
   };
 
   if (!exercise || repCount === null) {

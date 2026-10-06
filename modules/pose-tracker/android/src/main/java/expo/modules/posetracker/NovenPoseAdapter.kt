@@ -34,7 +34,14 @@ object NovenPoseAdapter {
         x = landmark.x().toDouble(),
         y = landmark.y().toDouble(),
         z = landmark.z().toDouble(),
-        visibility = landmark.visibility().orElse(0f).toDouble()
+        visibility = landmark.visibility().orElse(0f).toDouble(),
+        // Carried separately from `visibility`, never substituted for it.
+        // MediaPipe defines visibility as "visible or occluded by other objects"
+        // and presence as "present on the scene (located within scene bounds)".
+        // An unset score means the model did not report one, and is mapped to
+        // 0.0 so the JS side treats "unknown" as untrusted instead of
+        // assuming the landmark was really observed.
+        presence = landmark.presence().orElse(0f).toDouble()
       )
     }
 

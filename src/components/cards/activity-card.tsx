@@ -7,6 +7,12 @@ import { useTheme } from '@/hooks/use-theme';
 export type ActivityCardProps = PressableProps & {
   title: string;
   description?: string;
+  /**
+   * One small factual line beneath the description (target · difficulty ·
+   * length on an exercise card). Separate from `description` so the sentence a
+   * person reads and the facts they scan stay typographically distinct.
+   */
+  meta?: string;
   /** Element rendered inside the tinted icon plate (e.g. an expo-symbols icon). */
   icon?: ReactNode;
   /** Tint applied to the icon plate. */
@@ -19,6 +25,7 @@ export type ActivityCardProps = PressableProps & {
 export function ActivityCard({
   title,
   description,
+  meta,
   icon,
   tint = 'accent',
   rightLabel,
@@ -46,6 +53,7 @@ export function ActivityCard({
         {description ? (
           <Text style={[styles.description, { color: theme.textSecondary }]}>{description}</Text>
         ) : null}
+        {meta ? <Text style={[styles.meta, { color: theme.accentSecondary }]}>{meta}</Text> : null}
       </View>
       {rightLabel ? (
         <Text style={[styles.rightLabel, { color: theme.accent }]}>{rightLabel}</Text>
@@ -84,6 +92,12 @@ const styles = StyleSheet.create({
     ...Type.label,
     fontSize: 16,
     lineHeight: 24,
+    fontWeight: '600',
+  },
+  meta: {
+    ...Type.label,
+    fontSize: 15,
+    lineHeight: 21,
     fontWeight: '600',
   },
   rightLabel: {

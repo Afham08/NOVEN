@@ -8,6 +8,7 @@ import { exercisesCatalog, getExerciseById } from '../src/data/exercises';
 import { getExerciseConfig, isPoseTracked, poseTrackedConfigs } from '../src/exercise/pose-configs';
 import { buildProgress, type ProgressInput } from '../src/exercise/progress';
 import { createSessionRecord, parseSessionRecord } from '../src/exercise/session-store';
+import { sessionPhaseLabel, sessionTimerCaption, type SessionPhase } from '../src/exercise/session-phase';
 import { buildSessionMetrics } from '../src/exercise/metrics';
 import type { SessionMetrics } from '../src/exercise/types';
 
@@ -129,6 +130,174 @@ export function run(): void {
     check('it can resume', code.includes("'Resume'"));
     check('it can end early', code.includes('title="End"'));
     check('the pause and end controls are large targets', /minHeight: 60/.test(fs.readFileSync(fromComponents('ui', 'button.tsx'), 'utf8')));
+  });
+
+  suite('camera steps: the shared screen drives the existing pose pipeline', () => {
+    /*
+     * The registry suites prove a step's cameraConfigId RESOLVES. None of them
+     * can see the screen that consumes it. If the shared screen stopped
+     * resolving through the guided registry, stopped building the session
+     * engine for a yoga step, or stopped mounting the native pose view, every
+     * registry test would stay green while the camera silently never appeared
+     * for a step like Chair Yoga Flow's "Stand and Sit" — the same failure
+     * shape as the original dangling sit-to-stand id, one layer further up.
+     */
+    const code = stripComments(readComponent('guided', 'guided-activity-screen.tsx'));
+
+    check(
+      'a step resolves its camera config through the guided registry',
+      code.includes('getGuidedPoseConfig(snapshot.currentStep.cameraConfigId)'),
+    );
+    check(
+      'a camera step builds the shared session engine',
+      code.includes('cameraEngineRef.current = new SessionEngine(currentStepConfig)'),
+    );
+    check(
+      'the preview waits for permission and for the engine',
+      code.includes('hasCameraPermission === true') && code.includes('hasCameraEngine'),
+    );
+    check(
+      'the preview only mounts while a camera step is running',
+      code.includes('showCameraPreview &&'),
+    );
+    check(
+      'the preview is the existing native pose view, not a second camera',
+      code.includes('<PoseTrackerView') && code.includes('onPoseFrame={handlePoseFrame}'),
+    );
+    check(
+      'pose frames are fed to the engine',
+      code.includes('const result = engine.handlePoseFrame(event)'),
+    );
+    check(
+      'the voice layer reads the engine result',
+      code.includes('voiceRef.current?.onFrame(result)'),
+    );
+  });
+
+  suite('meditation camera stage: frames go to the posture tracker, never the rep engine', () => {
+    /*
+     * Meditation's camera stage has no repetition to count, so the shared
+     * screen recognises the kind, gives those frames to
+     * MeditationPostureTracker, and never builds a SessionEngine for it. Each
+     * line below guards a property whose absence would silently disable or
+     * corrupt the meditation camera while every registry test stayed green:
+     * the preview must not wait for an engine meditation never creates, the
+     * meditation branch must run before the engine and voice-on-frame paths,
+     * and the tracker's own sentence must be what the HUD shows.
+     */
+    const code = stripComments(readComponent('guided', 'guided-activity-screen.tsx'));
+
+    check(
+      'the screen recognises a meditation by its kind',
+      code.includes("const isMeditation = activity.kind === 'meditation'"),
+    );
+check(
+        /*
+         * Updated when pose-hold steps were added. Meditation and a pose step both
+         * run WITHOUT a SessionEngine by design - one has no repetition to count
+         * and the other has nothing to count at all - so the preview must not wait
+         * for an engine that will never arrive, for either of them. Asserted as the
+         * whole disjunction rather than one pair of terms so that removing any one
+         * of them fails here.
+         */
+        'the preview does not wait for an engine meditation never builds',
+        code.includes('isMeditation || isPoseStep || hasCameraEngine'),
+      );
+    check(
+      'no session engine is built for a meditation camera step',
+      code.includes('isCameraStep && currentStepConfig && !isMeditation'),
+    );
+    const meditationBranch = code.indexOf('if (isMeditation)');
+    check(
+      'meditation frames branch before the engine path',
+      meditationBranch !== -1 && meditationBranch < code.indexOf('engine.handlePoseFrame(event)'),
+      meditationBranch,
+    );
+    check(
+      'frames are handed to the posture tracker with the step own expectation',
+      code.includes('postureTrackerRef.current.observe(') &&
+        code.includes("snapshot.currentStep?.postureExpectation ?? 'in-frame'"),
+    );
+    check(
+      'the tracker result is what the posture HUD shows',
+      code.includes('setPostureGuidance(') &&
+        code.includes("postureGuidance?.text ?? 'Camera starting up'"),
+    );
+    check(
+      'meditation frames return before the voice-on-frame path',
+      meditationBranch !== -1 && meditationBranch < code.indexOf('voiceRef.current?.onFrame(result)'),
+      meditationBranch,
+    );
+    check(
+      'each stage speaks its own guidance once, guarded by step index',
+      code.includes("voiceRef.current?.consider('ready', step.guidance)") &&
+        code.includes('announcedStepRef.current === snapshot.stepIndex'),
+    );
+    check(
+      'nothing is spoken before Start or after the session ends',
+      code.includes('if (!running || step === null) return;'),
+    );
+    check(
+      'pause and resume are announced once each, as transitions',
+      code.includes('voiceRef.current?.announcePause();') &&
+        code.includes('voiceRef.current?.announceResume();'),
+    );
+    check(
+      'camera permission is only requested for activities that use it',
+      code.includes('if (!usesCamera) return;'),
+    );
+    check(
+      'a denied camera leaves an optional placeholder on meditation',
+      code.includes('<CameraPlaceholder optional={isMeditation} />'),
+    );
+  });
+
+  suite('exercise library: the detail screen offers this exercise its own history', () => {
+    /*
+     * The library's loop is choose, do, review — and the review half was only
+     * reachable from the Progress tab's mixed list, which cannot answer "how
+     * did THIS one go". These checks guard the wiring that closes that gap:
+     * the detail screen reads the real store, filters to itself through the
+     * one selector, and reopens rows through the same result screen a live
+     * finish uses. The shared list must also keep its whole-history behaviour
+     * unchanged when no exercise is named.
+     */
+    const detail = stripComments(read('exercise', '[id].tsx'));
+    check(
+      'the detail screen reads the real session store',
+      detail.includes("from '@/exercise/session-storage'") && detail.includes('store={sessionStore}'),
+    );
+    check("it lists only this exercise's sessions", detail.includes('exerciseId={exercise.id}'));
+    check('the section is labelled', detail.includes('title="Your sessions"'));
+    check(
+      'a row reopens the existing result screen',
+      detail.includes("pathname: '/exercise/result'"),
+    );
+    check(
+      'the reopened values are the same formatted params Progress uses',
+      detail.includes('formatDurationLabel(') &&
+        detail.includes('formatPaceLabel(') &&
+        detail.includes('formatRangeLabel(') &&
+        detail.includes('formatConsistencyLabel('),
+    );
+
+    const historyCode = stripComments(readComponent('session', 'session-history.tsx'));
+    check(
+      'the shared list filters through the one selector',
+      historyCode.includes('sessionsForExercise(records, exerciseId)'),
+    );
+    check(
+      'without a filter it keeps the whole history',
+      historyCode.includes('exerciseId === undefined ? records'),
+    );
+    check(
+      'the whole-history empty state is unchanged',
+      historyCode.includes('Finish an exercise, a yoga routine, or a calm moment'),
+    );
+    check(
+      'the kept-on-device note still counts the whole history',
+      historyCode.includes('All ${records.length} sessions are kept on this device'),
+    );
   });
 
   // ==========================================================================
@@ -375,4 +544,207 @@ export function run(): void {
     check('it offers no way to tick something by hand', !/markDone|toggleDone|onToggle/.test(code), code);
     check('a day view still works with no done ids', guidedActivitiesForDay('wellness', []).every((e) => !e.done));
   });
+
+  suite('saving a session: the result screen only ever claims a write that landed', () => {
+    /*
+     * The wording itself is unit tested in activities.test.ts. What no unit test
+     * can reach is the WIRING: this harness has no React renderer, so nothing
+     * exercises the screen bodies. If the guided screen went back to swallowing
+     * the rejection, or stopped passing the outcome on, every save-status test
+     * would still pass while a failed write rendered "Yes" again.
+     */
+    const screen = stripComments(readComponent('guided', 'guided-activity-screen.tsx'));
+    const result = stripComments(read('activity-result.tsx'));
+
+    /*
+     * The write is now awaited inside `finishOwnedSession`, which is what makes
+     * the await safe: it re-checks that this completion still owns the screen
+     * before navigating. The invariant these checks protect is unchanged - the
+     * screen waits for the write, does not fire it away, and passes the real
+     * outcome on - but the shape is "hand the write to the owner" rather than
+     * "await it here and assign a flag". `completion-ownership.test.ts` covers
+     * the new boundary behaviourally.
+     */
+    check(
+      'the guided screen waits for the write instead of discarding it',
+      /await finishOwnedSession\(\{/.test(screen) && /save: \(\) => sessionStore\.saveSession\(record\)/.test(screen),
+      screen,
+    );
+    check('it no longer fires the write away and swallows it', !/void sessionStore\.saveSession/.test(screen), screen);
+    check(
+      'the write outcome becomes the status it reports',
+      /const saveStatus: SaveStatus = saved \? 'saved' : 'failed'/.test(screen),
+      screen,
+    );
+    check('it passes that outcome to the result screen', /saved: saveStatus/.test(screen), screen);
+
+    check('the result screen reads the reported outcome', /parseSaveStatusParam\(saved\)/.test(result), result);
+    check('it phrases the save from that outcome', /describeSaveStatus\(/.test(result), result);
+    check('it no longer decides the save from how the session ended', !/ranToTheEnd \? 'Yes'/.test(result), result);
+    check('no bare Yes is left beside the save row', !/label="Saved to your history"\s*value="Yes/.test(result), result);
+  });
+
+  suite('guided reps: the screen folds measured repetitions into the saved record', () => {
+    /*
+     * The counting and the arithmetic are unit tested in activities.test.ts. What
+     * no unit test can reach is the WIRING: this harness has no React renderer,
+     * so if the screen stopped folding the engine's count in, or went back to a
+     * literal zero, every tally test would stay green while the history recorded
+     * 0 against a HUD that had just counted N.
+     */
+    const screen = stripComments(readComponent('guided', 'guided-activity-screen.tsx'));
+
+    check('each camera frame folds the engine count into the tally', /observeStepReps\(repTallyRef\.current, result\.reps\)/.test(screen), screen);
+    check('a rebuilt engine starts a new step contribution', /beginStep\(repTallyRef\.current\)/.test(screen), screen);
+    check('the saved metrics are built from the measured tally', /buildSessionMetrics\(\{\s*reps: measuredReps\(repTallyRef\.current\)/.test(screen), screen);
+    check('it does not save a hardcoded zero any more', !/buildSessionMetrics\(\{\s*reps: 0/.test(screen), screen);
+    check('starting again clears the previous session total', /repTallyRef\.current = emptyRepTally\(\)/.test(screen), screen);
+    check('the unmeasured fields stay unmeasured', /rangeMinDeg: null/.test(screen) && /rangeMaxDeg: null/.test(screen) && /repRanges: \[\]/.test(screen), screen);
+
+    /*
+     * The spoken completion is the same bug one layer out: the tally existed but
+     * `announceCompletion(0)` was hardcoded, so a session that counted reps said
+     * nothing about them while the history recorded the count. Nothing here can
+     * render the screen, so the argument the screen passes is pinned directly.
+     */
+    check(
+      'the closing line announces the same measured tally',
+      /announceCompletion\(measuredReps\(repTallyRef\.current\)\)/.test(screen),
+      screen,
+    );
+    check('it no longer announces a hardcoded zero', !/announceCompletion\(0\)/.test(screen), screen);
+
+    const announceAt = screen.indexOf('announceCompletion(');
+    const metricsAt = screen.indexOf('buildSessionMetrics({');
+    check(
+      'the tally is final before the number is announced',
+      screen.indexOf('leavingRef.current = true') > -1 &&
+        screen.indexOf('leavingRef.current = true') < announceAt,
+      screen,
+    );
+    check(
+      'the announced count and the saved count cannot drift apart',
+      announceAt > -1 && metricsAt > announceAt && !/\bawait\b/.test(screen.slice(announceAt, metricsAt)),
+      screen.slice(announceAt, metricsAt),
+    );
+  });
 }
+
+/*
+ * ---------------------------------------------------------------------------
+ * The session screen describes the session's phase in TWO places: the status chip
+ * beside the camera feed, and the caption under the clock. The timer used to be
+ * handed only `running: boolean` and answered "Session in progress" or
+ * "Session paused", so a four-phase screen was described by a two-state
+ * sentence. That printed "Session paused" on the pre-Start screen - directly
+ * under a chip reading "Ready" - and again on the finished screen, under a chip
+ * reading "Session complete" and a banner reading "SESSION COMPLETE".
+ *
+ * A person cannot pause a session that has not started or that has already
+ * finished, and this audience is being asked to trust that the numbers on
+ * screen mean what they say. Both wrong readings sat under the clock, the one
+ * thing on screen they are most likely to be looking at.
+ * ---------------------------------------------------------------------------
+ */
+const SESSION_PHASES: readonly SessionPhase[] = ['ready', 'running', 'paused', 'completed'];
+
+suite('session: every phase is described honestly, and both indicators agree', () => {
+  /*
+   * The exact regression, phase by phase. "paused" is the only phase that may
+   * claim the session is paused.
+   */
+  check(
+    'only a paused session is told it is paused',
+    SESSION_PHASES.filter((phase) => sessionTimerCaption(phase) === 'Session paused').join() ===
+      'paused',
+    SESSION_PHASES.map((phase) => `${phase} -> "${sessionTimerCaption(phase)}"`).join(' | '),
+  );
+  check('a session waiting to start is not called paused', sessionTimerCaption('ready') !== 'Session paused');
+  check('a finished session is not called paused', sessionTimerCaption('completed') !== 'Session paused');
+  check('a paused session still says so', sessionTimerCaption('paused') === 'Session paused');
+  check('the running caption is unchanged', sessionTimerCaption('running') === 'Session in progress');
+
+  /*
+   * The caption has to name the state, not merely avoid the wrong word: "Done",
+   * for instance, would pass every check above while still telling the reader
+   * nothing about whether their time counted.
+   */
+  check(
+    'each caption names its own phase',
+    sessionTimerCaption('ready').includes('Ready') &&
+      sessionTimerCaption('running').includes('progress') &&
+      sessionTimerCaption('paused').includes('paused') &&
+      sessionTimerCaption('completed').includes('complete'),
+    SESSION_PHASES.map((phase) => `${phase} -> "${sessionTimerCaption(phase)}"`).join(' | '),
+  );
+  check(
+    'no two phases share a caption, so the screen never looks stuck',
+    new Set(SESSION_PHASES.map(sessionTimerCaption)).size === SESSION_PHASES.length,
+  );
+
+  /*
+   * The contradiction itself: the chip and the caption sat a few centimetres
+   * apart on the same screen, so the two wordings for one phase must agree.
+   * "Paused"/"Session paused" and "Session complete"/"Session complete" agree;
+   * "Ready"/"Ready to start" and "Session in progress" agree with themselves.
+   * Compared case-insensitively, because a chip label is title-cased and a
+   * sentence is not - "Paused" and "Session paused" are the same statement.
+   */
+  check(
+    'the chip and the caption describe each phase compatibly',
+    SESSION_PHASES.every((phase) => {
+      const label = sessionPhaseLabel(phase).toLowerCase();
+      const caption = sessionTimerCaption(phase).toLowerCase();
+      return label === caption || caption.includes(label) || label.includes(caption);
+    }),
+    SESSION_PHASES.map((phase) => `${phase} -> chip "${sessionPhaseLabel(phase)}" / caption "${sessionTimerCaption(phase)}"`).join(' | '),
+  );
+
+  check(
+    'the chip keeps the wording people are used to',
+    sessionPhaseLabel('ready') === 'Ready' &&
+      sessionPhaseLabel('paused') === 'Paused' &&
+      sessionPhaseLabel('completed') === 'Session complete',
+    SESSION_PHASES.map((phase) => `${phase} -> "${sessionPhaseLabel(phase)}"`).join(' | '),
+  );
+});
+
+suite('session: the timer is wired to the phase, not to a two-state flag', () => {
+  const screen = stripComments(read('exercise', 'session.tsx'));
+  const timer = stripComments(readComponent('session', 'session-timer.tsx'));
+
+  /*
+   * The timer must receive the phase itself. Re-introducing the boolean is
+   * exactly the defect, so it is pinned from both ends: the screen must not
+   * reduce the phase to a flag, and the component must not accept one.
+   */
+  check('the timer is given the phase itself', /<SessionTimer[\s\S]{0,200}phase=\{phase\}/.test(screen), screen.slice(screen.indexOf('<SessionTimer'), screen.indexOf('<SessionTimer') + 200));
+  check('the screen no longer reduces the phase to a boolean for the timer', !/timerRunning|phase === 'running';\s*\n\s*const/.test(screen), screen);
+  check('the timer no longer takes a running flag', !/\brunning\b\s*[:?]/.test(timer) && !/\{running \?/.test(timer), timer);
+  check('the timer reads its caption from the shared phase wording', /sessionTimerCaption\(phase\)/.test(timer), timer);
+
+  /*
+   * One definition of the phases: the screen and the timer both import the union
+   * from the shared module rather than each re-declaring it, so a fifth phase
+   * cannot be added to one side only and quietly fall through on the other.
+   */
+  const shared = fs.readFileSync(fromSrc('exercise', 'session-phase.ts'), 'utf8');
+  check(
+    'the phases are declared exactly once',
+    /export type SessionPhase = 'ready' \| 'running' \| 'paused' \| 'completed';/.test(shared) &&
+      !/type SessionPhase\s*=/.test(screen) &&
+      !/type SessionPhase\s*=/.test(timer),
+    shared,
+  );
+  check(
+    'both the screen and the timer import them from there',
+    /import \{[^}]*type SessionPhase[^}]*\} from '@\/exercise\/session-phase'/.test(screen) &&
+      /import \{[^}]*type SessionPhase[^}]*\} from '@\/exercise\/session-phase'/.test(timer),
+    `screen: ${/session-phase/.test(screen)} | timer: ${/session-phase/.test(timer)}`,
+  );
+  check(
+    'the chip reads the shared wording instead of its own ternary',
+    /const chipLabel = sessionPhaseLabel\(phase\);/.test(screen) && !/phase === 'ready'\s*\?\s*'Ready'/.test(screen),
+    screen,
+  );
+});

@@ -363,12 +363,95 @@ export type SessionStore = {
  * the whole history on every render, and a write refreshes that cache only once
  * the write has actually landed, so a failed write cannot make the in-memory
  * view disagree with the device.
+ *
+ * WHAT "COULD NOT READ" IS NOT
+ * `cache` is `null` for "not loaded yet" and an array for "loaded", so assigning
+ * `[]` to it after a failed read would be a claim the store cannot support: it
+ * would mean "the history was read, and it was empty", when in fact nothing was
+ * read at all. That claim is dangerous because a save is built by merging into
+ * the cached list, so a history believed to be empty would be written back over
+ * the key as a single new session and every stored session would be destroyed.
+ *
+ * So a failed read is not cached. `readFailed` records that the last attempt got
+ * no answer, which gives `read()` two jobs to stay honest about:
+ *
+ *   - it leaves `cache` at `null`, so the next read retries the storage instead of
+ *     reporting an empty history for the rest of the process, and
+ *   - it makes `write()` refuse, so an unread history is never overwritten.
+ *
+ * A caller still gets `[]` back from a read that failed, because a list it could
+ * not load must still render and the empty state is the honest answer for it.
+ * That is unchanged. What changes is that the store no longer mistakes "could not
+ * read" for "read it, and there was nothing there".
  */
 export function createSessionStore(store: KeyValueStore): SessionStore {
   let cache: SessionRecord[] | null = null;
+  let readFailed = false;
+
+  /*
+   * ==========================================================================
+   * WHY THIS STORE NEEDS TWO PIECES OF CONCURRENCY STATE
+   * ==========================================================================
+   *
+   * `cache` and `readFailed` are shared by every caller, and reaching storage
+   * means awaiting. Two things can therefore go wrong that no amount of care
+   * inside a single operation can prevent, because the damage happens BETWEEN
+   * operations.
+   *
+   * A SAVE THAT LOSES A SESSION
+   * Saving is a read-modify-write: read the stored list, drop any entry with the
+   * same id, add the new record, write the whole thing back. Two saves that
+   * interleave both read the same old list and both write a list derived from it,
+   * so whichever lands last erases the other's session. Nothing threw. A user
+   * simply finds a session they had just finished missing from their history.
+   *
+   * A CLEAR THAT UN-CLEARS
+   * A read that is already in flight when `clearSessions()` runs was issued
+   * against the history that existed BEFORE the clear. If it is allowed to land
+   * afterwards, it repopulates the cache with the very records the user just
+   * deleted, and the next save merges into them and writes them back to the key.
+   * Deleting your history would silently fail, which for a privacy control is
+   * worse than a crash.
+   *
+   * THE TWO MECHANISMS, AND WHY TWO
+   * `tail` serializes every MUTATION, so a save's read-modify-write is never
+   * interleaved with another save's, delete's, or clear's. Order is the order the
+   * app called the methods in, so a save made before a clear is deleted by that
+   * clear, and a save made after it survives. That is the intuitive rule and the
+   * one callers already assume.
+   *
+   * `storedEpoch` guards READS. Reads are deliberately NOT queued, so a slow or
+   * hung `getItem` cannot stall the recording of a finished session; a read is
+   * only a snapshot for the caller, and a slightly stale snapshot is harmless.
+   * What is not harmless is a stale read PUBLISHING its answer. So a read notes
+   * the epoch it was issued under and refuses to touch the cache if a mutation
+   * has landed since. Queueing the mutations also means a mutation's own read
+   * always sees a current epoch, so the guard costs those reads nothing.
+   */
+  let storedEpoch = 0;
+
+  /** Resolves only after every mutation queued so far has settled. */
+  let tail: Promise<void> = Promise.resolve();
+
+  /**
+   * Runs `task` once every previously queued mutation has settled.
+   *
+   * The chain is reassigned to a promise that swallows its own outcome, so one
+   * rejected operation cannot wedge the queue for the rest of the process; the
+   * caller still receives the rejection from the promise returned here.
+   */
+  function enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const result = tail.then(task);
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
 
   async function read(): Promise<SessionRecord[]> {
     if (cache !== null) return cache;
+    const issuedAt = storedEpoch;
     let raw: string | null = null;
     try {
       raw = await store.getItem(SESSION_HISTORY_KEY);
@@ -376,26 +459,77 @@ export function createSessionStore(store: KeyValueStore): SessionStore {
       // A storage read that throws is treated as "nothing stored yet" rather
       // than propagated: the history list degrades to empty instead of the app
       // failing to render.
-      cache = [];
-      return cache;
+      //
+      // `cache` is deliberately left alone rather than set to `[]`. It stays
+      // `null` so the next call retries the storage instead of serving this empty
+      // list for the rest of the process, and `readFailed` records that nothing
+      // has actually been read yet so `write()` knows it must not overwrite it.
+      //
+      // Unless a mutation has landed since, in which case this answer is about a
+      // history that no longer exists and must be discarded rather than recorded
+      // as a failure: a clear that already removed the key is exactly the case
+      // where the next save is entitled to write.
+      if (issuedAt !== storedEpoch) return cache ?? [];
+      readFailed = true;
+      return [];
     }
+    /*
+     * The epoch is re-checked before the result is published, which is the whole
+     * point. A read that was in flight across a clear must not repopulate the
+     * cache with the deleted records, and a read that was in flight across a save
+     * must not overwrite the cache with the pre-save list, because the next save
+     * would merge into that stale list and drop the session just written.
+     *
+     * Falling back to the cache is safe precisely because the mutation that moved
+     * the epoch is what populated it: a clear sets it to `[]`, and a write sets it
+     * to what it just stored. If neither happened, the cache is still `null` and
+     * the honest answer is the empty list.
+     */
+    if (issuedAt !== storedEpoch) return cache ?? [];
     cache = parseSessionHistory(raw);
+    readFailed = false;
     return cache;
   }
 
   async function write(records: SessionRecord[]): Promise<void> {
+    // `records` is always "what was already stored, plus the new one", so if its
+    // starting point came from a read that failed it is not the stored history at
+    // all - it is an empty list, and writing it would delete every session
+    // currently on the device. Refusing is the only way to keep them. The caller
+    // already has to handle a save that does not land, and a session that went
+    // unrecorded costs far less than a history that cannot be recovered.
+    //
+    // This is unreachable from `deleteSession`: with no successful read its list
+    // is empty, so nothing matches and it reports false before writing. Deletion
+    // therefore keeps its existing behaviour either way.
+    if (readFailed) {
+      throw new Error('session history could not be read; refusing to overwrite it');
+    }
     const sorted = sortNewestFirst(records).slice(0, MAX_SAVED_SESSIONS);
+    // Bumped before the write reaches storage, not after, so a read that settles
+    // while `setItem` is still pending is already known to be describing the
+    // pre-write history. That also covers the case where this write fails: the
+    // cache is then still the last known-good list, and a read landing now would
+    // be free to clobber it with something older.
+    storedEpoch += 1;
     await store.setItem(SESSION_HISTORY_KEY, JSON.stringify(sorted));
     cache = sorted;
   }
 
   return {
-    async saveSession(record) {
-      const existing = await read();
-      const without = existing.filter((entry) => entry.id !== record.id);
-      const next = sortNewestFirst([...without, record]);
-      await write(next);
-      return record;
+    /*
+     * Inside the queue, so this save's read-modify-write cannot interleave with
+     * another one's. Without it, two sessions finished at once could each read the
+     * same list and each write a list that knew nothing of the other.
+     */
+    saveSession(record) {
+      return enqueue(async () => {
+        const existing = await read();
+        const without = existing.filter((entry) => entry.id !== record.id);
+        const next = sortNewestFirst([...without, record]);
+        await write(next);
+        return record;
+      });
     },
 
     async getSessions() {
@@ -406,17 +540,61 @@ export function createSessionStore(store: KeyValueStore): SessionStore {
       return (await read()).find((entry) => entry.id === id) ?? null;
     },
 
-    async deleteSession(id) {
-      const existing = await read();
-      const next = existing.filter((entry) => entry.id !== id);
-      if (next.length === existing.length) return false;
-      await write(next);
-      return true;
+    deleteSession(id) {
+      return enqueue(async () => {
+        const existing = await read();
+        const next = existing.filter((entry) => entry.id !== id);
+        if (next.length === existing.length) return false;
+        await write(next);
+        return true;
+      });
     },
 
-    async clearSessions() {
-      await store.removeItem(SESSION_HISTORY_KEY);
-      cache = [];
+    /*
+     * WHY `readFailed` IS RESET HERE
+     * -------------------------------
+     * `readFailed` means "the stored history is unknown, so a write could destroy
+     * it". A successful `removeItem` retires exactly that condition: the key no
+     * longer exists, so there is no unread history left for a write to overwrite.
+     * The refusal is therefore no longer protecting anything, and the store is
+     * back in the same state a successful read would have left it in.
+     *
+     * WHY IT USED TO STICK — the permanently-unrecordable store
+     * ---------------------------------------------------------
+     * The flag was left set, and because `cache` is `[]` rather than `null` here,
+     * every later `read()` takes the cache-first early return and so never
+     * reaches the line that clears `readFailed` on a good read. The store was
+     * therefore stuck for the rest of the process: every `saveSession` rejected
+     * with "session history could not be read; refusing to overwrite it" even
+     * though the user had just deleted that history themselves.
+     *
+     * Reaching it needs a read to have failed first (a transient storage error),
+     * which is exactly the situation a user is most likely to clear their history
+     * in. The exercise session screen absorbs a save rejection, so the next
+     * session the user finished showed a result screen and then silently left no
+     * trace in their history, with nothing to tell them why.
+     *
+     * QUEUED, AND THE ORDERING RULE FOR save + clear
+     * ----------------------------------------------
+     * A clear is queued like any other mutation, so the two of them take effect in
+     * the order the app called them: a `saveSession` awaited (or merely issued)
+     * before `clearSessions` is erased by that clear, and one issued after it
+     * survives. Interleaving them would leave the outcome up to whichever storage
+     * write happened to land last, which is not a rule a caller could reason about.
+     *
+     * The epoch is bumped BEFORE the key is removed rather than after. A read that
+     * settles while `removeItem` is still pending is already describing a history
+     * the user has asked to delete, and must not be able to publish it - and
+     * because a clear sets the cache to `[]` itself, nothing legitimate is lost by
+     * invalidating that early: every later save still reads and writes normally.
+     */
+    clearSessions() {
+      return enqueue(async () => {
+        storedEpoch += 1;
+        await store.removeItem(SESSION_HISTORY_KEY);
+        cache = [];
+        readFailed = false;
+      });
     },
   };
 }

@@ -58,7 +58,20 @@ export type LandmarkEventPayload = {
   x: number;
   y: number;
   z: number;
+  /**
+   * MediaPipe "likelihood of the landmark being visible within the image",
+   * also collapsed when the landmark is out of scene bounds.
+   */
   visibility: number;
+  /**
+   * MediaPipe "float score of whether landmark is present on the scene
+   * (located within scene bounds)". Carried SEPARATELY from `visibility`,
+   * because a landmark the model inferred for an occluded limb can keep a
+   * usable-looking visibility while its presence shows nothing was really
+   * there. Unset natively is delivered as `0`, i.e. explicitly untrusted —
+   * see `src/exercise/landmark-trust.ts`.
+   */
+  presence: number;
 };
 
 export type PoseFrameEventPayload = {

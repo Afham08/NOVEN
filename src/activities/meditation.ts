@@ -3,11 +3,25 @@ import { defineGuidedActivity, type GuidedActivity } from './types';
 /**
  * Meditation sessions: a timer, a few stages, and nothing else.
  *
- * There is no audio, because NOVEN has none, and there is no breathing counter,
- * because NOVEN cannot see the user and would be guessing. What it does have is a
- * clock, a sequence of stages that move at a sensible rate, and words telling
- * the person where their attention is supposed to be. That is enough for a
- * session to be worth starting and worth recording.
+ * There is no audio, because NOVEN has none, and there is no breathing COUNTER,
+ * because NOVEN cannot see the user and would be guessing - a camera sees a torso,
+ * and a torso is not breathing. What the breathing stage does have is a PACER: a
+ * repeating sequence of phases with lengths attached, telling the person when to
+ * breathe in, when to hold and when to breathe out. See `breath-cycle.ts`. It says
+ * when, never whether: it has no input that could tell it what anybody actually
+ * did, and nothing it produces may be worded as though it had.
+ *
+ * On top of that, each session has a clock, a sequence of stages that move at a
+ * sensible rate, and words telling the person where their attention is supposed to
+ * be. That is enough for a session to be worth starting and worth recording.
+ *
+ * A few opening stages also carry `cameraConfigId`, which turns the camera on for
+ * that stage alone so the settling-in can be helped along. What the camera is
+ * allowed to say there is set by `postureExpectation` and nothing more: it can
+ * tell somebody they are not in frame, and on the stages that ask to be seated it
+ * can tell them their back is not upright. It says nothing about calm, focus,
+ * breathing, or whether they are meditating, because nothing in the frame
+ * supports any of those. See `meditation-guidance.ts`.
  *
  * Every session is a multiple of a short first stage, so "one minute" really is
  * one minute and not a one-minute session with a long sit in the middle. The
@@ -26,6 +40,8 @@ export const meditationSessions: readonly GuidedActivity[] = [
         seconds: 10,
         title: 'Settle',
         guidance: 'Sit comfortably. Let your hands rest, and let your shoulders drop.',
+        cameraConfigId: 'meditation-posture',
+        postureExpectation: 'seated-upright',
       },
       {
         seconds: 30,
@@ -53,6 +69,8 @@ export const meditationSessions: readonly GuidedActivity[] = [
         seconds: 20,
         title: 'Settle',
         guidance: 'Sit comfortably and close your eyes, or soften your gaze.',
+        cameraConfigId: 'meditation-posture',
+        postureExpectation: 'seated-upright',
       },
       {
         seconds: 20,
@@ -60,10 +78,23 @@ export const meditationSessions: readonly GuidedActivity[] = [
         guidance: 'Notice the weight of your body in the chair, and your feet on the floor.',
       },
       {
+        /*
+         * The one step in the catalogue that paces a breath rather than only
+         * describing one. `breathingTechniqueId` names the pattern; the phases and
+         * their lengths live with the technique in `breath-cycle.ts`, so this file
+         * cannot promise a pattern the engine is not actually running.
+         *
+         * Note what is NOT here: no camera. Nothing about a breath can be seen from
+         * a torso, and turning the camera on for this step would mount a preview
+         * whose posture verdict ("Straighten your back") has nothing to do with
+         * breathing and would be read as though it did. The camera stays on the
+         * Settle step above, where posture guidance is honest and useful.
+         */
         seconds: 120,
         title: 'Breathe',
         guidance:
           'Breathe in slowly, and out slowly. If your mind wanders, that is fine, and noticing it is the practice.',
+        breathingTechniqueId: 'box-breathing',
       },
       {
         seconds: 60,
@@ -91,6 +122,11 @@ export const meditationSessions: readonly GuidedActivity[] = [
         seconds: 30,
         title: 'Settle',
         guidance: 'Lie down or sit back, whichever is more comfortable. Loosen anything tight.',
+        cameraConfigId: 'meditation-posture',
+        // This step invites the person to lie down, so the camera may confirm
+        // they are in frame and must not comment on how upright they are. See
+        // `MeditationPostureExpectation`.
+        postureExpectation: 'in-frame',
       },
       {
         seconds: 150,

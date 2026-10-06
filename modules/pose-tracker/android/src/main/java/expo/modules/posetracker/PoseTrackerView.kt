@@ -35,8 +35,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.util.Collections
 import java.util.IdentityHashMap
-import java.io.File
-import java.io.FileOutputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -302,9 +300,6 @@ class PoseTrackerView(
             logPreviewGeometry("3500ms")
             applyScaleFillTransform()
           }, 2000)
-          previewView.postDelayed({
-            dumpTextureBitmap()
-          }, 4500)
           previewView.postDelayed({
             applyScaleFillTransform()
             dumpOverlapSiblings()
@@ -730,74 +725,6 @@ class PoseTrackerView(
   private fun hasCameraPermission(): Boolean =
     ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) ==
       PackageManager.PERMISSION_GRANTED
-
-  private fun dumpTextureBitmap() {
-    for (i in 0 until previewView.childCount) {
-      val child = previewView.getChildAt(i)
-      if (child is TextureView && child.isAvailable) {
-        val bmp = try { child.bitmap } catch (e: Exception) { null }
-        if (bmp != null) {
-          Log.i(TAG, "[DIAG-BITMAP] captured ${bmp.width}x${bmp.height}")
-          val pw = bmp.width
-          val ph = bmp.height
-          var minX = Int.MAX_VALUE
-          var minY = Int.MAX_VALUE
-          var maxX = -1
-          var maxY = -1
-          var blackTotal = 0L
-          var total = 0L
-          val rowBuf = IntArray(pw)
-          val isBlack = { c: Int -> ((c shr 16) and 0xff) + ((c shr 8) and 0xff) + (c and 0xff) <= 24 }
-          for (y in 0 until ph) {
-            bmp.getPixels(rowBuf, 0, pw, 0, y, pw, 1)
-            var rowBlack = 0
-            for (x in 0 until pw) {
-              total++
-              if (isBlack(rowBuf[x])) rowBlack++ else {
-                if (x < minX) minX = x
-                if (x > maxX) maxX = x
-                if (y < minY) minY = y
-                if (y > maxY) maxY = y
-              }
-            }
-            blackTotal += rowBlack
-          }
-          var lastBlackRow = -1
-          for (y in ph - 1 downTo 0) {
-            bmp.getPixels(rowBuf, 0, pw, 0, y, pw, 1)
-            var rowBlack = 0
-            for (x in 0 until pw) { if (isBlack(rowBuf[x])) rowBlack++ }
-            if (rowBlack > pw * 0.9) { lastBlackRow = y; break }
-          }
-          var lastBlackCol = -1
-          for (x in pw - 1 downTo 0) {
-            var colBlack = 0
-            for (y in 0 until ph) { if (isBlack(bmp.getPixel(x, y))) colBlack++ }
-            if (colBlack > ph * 0.9) { lastBlackCol = x; break }
-          }
-          val cw = if (maxX >= minX) maxX - minX + 1 else 0
-          val ch = if (maxY >= minY) maxY - minY + 1 else 0
-          Log.i(
-            TAG,
-            "[DIAG-BITMAP] size=${pw}x${ph} blackFrac=${String.format("%.1f", 100.0 * blackTotal / total)}% " +
-              "contentBox=[$minX,$minY]-[$maxX,$maxY] contentSize=${cw}x${ch} " +
-              "blackColBand=$lastBlackCol blackRowBand=$lastBlackRow"
-          )
-          try {
-            val file = File(context.filesDir, "previewbitmap.png")
-            FileOutputStream(file).use { fos ->
-              bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 90, fos)
-            }
-            Log.i(TAG, "[DIAG-BITMAP] saved ${file.absolutePath}")
-          } catch (e: Exception) {
-            Log.e(TAG, "[DIAG-BITMAP] save failed: ${e.message}", e)
-          }
-        } else {
-          Log.i(TAG, "[DIAG-BITMAP] unavailable")
-        }
-      }
-    }
-  }
 
   override fun onDetachedFromWindow() {
     super.onDetachedFromWindow()

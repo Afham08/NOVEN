@@ -35,11 +35,11 @@ export type FeedbackKind =
   | 'stabilizing'
   /** Counting is enabled and the legs are at rest. */
   | 'ready'
-  /** One or both legs are straightening. */
+  /** The movement is travelling away from where it started. */
   | 'extend'
-  /** A leg reached full extension and is being held. */
+  /** The movement reached the end of its range and is being held. */
   | 'hold'
-  /** A leg is coming back down. */
+  /** The movement is coming back. */
   | 'return'
   /** A rep was just counted (held on screen by the latch below). */
   | 'good'
@@ -114,19 +114,122 @@ export function priorityPhase(left: RepPhase, right: RepPhase): RepPhase {
   return 'rest';
 }
 
-/** Live coaching cue from the rep phase machine. */
-export function phaseFeedback(phase: RepPhase, completedThisFrame: boolean): FeedbackCue {
+/**
+ * The wording a live cue uses for one movement.
+ *
+ * Only the three phase strings vary. `FeedbackKind` does NOT: the voice layer
+ * reacts to the kind, so the screen and the speaker keep agreeing on what is
+ * happening while the words follow the movement.
+ */
+export type MovementWording = {
+  extend: string;
+  hold: string;
+  return: string;
+};
+
+/**
+ * What is said when nothing is known about the movement.
+ *
+ * This is the default on purpose. `phaseFeedback` used to say "Extend your
+ * knee" unconditionally, which was true for exactly one of the movements NOVEN
+ * offers and wrong for every other one, so a person doing a neck stretch was
+ * told to straighten their leg. When the movement is not identified, the honest
+ * thing to say is something that is true of any of them.
+ */
+const NEUTRAL_WORDING: MovementWording = {
+  extend: 'Move slowly',
+  hold: 'Hold it there',
+  return: 'Come back slowly',
+};
+
+/**
+ * How each camera movement is described, keyed by the config id that already
+ * identifies it.
+ *
+ * The ids are the ones `ExerciseConfig.id` already carries, so nothing new is
+ * invented to tell the movements apart: the session engine already holds the
+ * config, and the guided screen already resolves a step to one. A movement that
+ * is absent from this table gets `NEUTRAL_WORDING`, which means adding a
+ * movement can never silently inherit someone else's instructions.
+ *
+ * These are descriptions of the movement being performed, not advice about it.
+ * NOVEN is a wellness app and says nothing here about what is correct for a
+ * particular person, their joints, or their treatment.
+ */
+const MOVEMENT_WORDING: Readonly<Record<string, MovementWording>> = {
+  // The one movement the knee wording was ever written for.
+  'seated-knee-extension': {
+    extend: 'Extend your knee',
+    hold: 'Keep it straight',
+    return: 'Return slowly',
+  },
+  'seated-arm-raise': {
+    extend: 'Lift your arm',
+    hold: 'Hold it there',
+    return: 'Lower slowly',
+  },
+  'sit-to-stand': {
+    extend: 'Stand up slowly',
+    hold: 'Hold it there',
+    return: 'Sit down slowly',
+  },
+  'yoga-neck-extension': {
+    extend: 'Look up slowly',
+    hold: 'Hold it there',
+    return: 'Look forward slowly',
+  },
+  'yoga-shoulder-flexion': {
+    extend: 'Lift your arms',
+    hold: 'Hold it there',
+    return: 'Lower slowly',
+  },
+  'yoga-trunk-lateral-flexion': {
+    extend: 'Bend to one side',
+    hold: 'Hold it there',
+    return: 'Come back slowly',
+  },
+  'yoga-trunk-forward-flexion': {
+    extend: 'Bend forward',
+    hold: 'Hold it there',
+    return: 'Come back slowly',
+  },
+  'yoga-seated-hip-flexion': {
+    extend: 'Lift your knee',
+    hold: 'Hold it there',
+    return: 'Lower slowly',
+  },
+};
+
+/** The wording for a movement, or neutral wording when it is not a known one. */
+export function movementWording(movementId?: string): MovementWording {
+  return (movementId !== undefined && MOVEMENT_WORDING[movementId]) || NEUTRAL_WORDING;
+}
+
+/**
+ * Live coaching cue from the rep phase machine.
+ *
+ * `movementId` is the config id of the movement being performed, which the
+ * session engine already knows. Without it the cue stays generic on purpose:
+ * a phase cannot tell you which body part is moving, so it must not claim to.
+ */
+export function phaseFeedback(
+  phase: RepPhase,
+  completedThisFrame: boolean,
+  movementId?: string,
+): FeedbackCue {
   if (completedThisFrame) return cue('Good movement', 'sage', 'good');
+
+  const wording = movementWording(movementId);
 
   switch (phase) {
     case 'rest':
       return cue('Ready', 'ready', 'ready');
     case 'extending':
-      return cue('Extend your knee', 'accent', 'extend');
+      return cue(wording.extend, 'accent', 'extend');
     case 'extended':
-      return cue('Keep it straight', 'sage', 'hold');
+      return cue(wording.hold, 'sage', 'hold');
     case 'returning':
-      return cue('Return slowly', 'accent', 'return');
+      return cue(wording.return, 'accent', 'return');
   }
 }
 

@@ -422,6 +422,59 @@ export const SEATED_HIP_FLEXION: ExerciseConfig = {
 };
 
 /**
+ * The handle that attaches the camera to a meditation step.
+ *
+ * WHAT THIS IS, PRECISELY
+ * It is a marker, not a prescription. `GuidedStep.cameraConfigId` resolves
+ * through the guided registry, and a step that resolves is a step that shows
+ * the camera preview - that resolution is the only thing being used here.
+ * Meditation never runs the `SessionEngine` on this config, so none of the
+ * thresholds below decide anything: there is no rep to count, no range to
+ * record, and no rep tally anywhere in a meditation session.
+ *
+ * WHY NO REPS AT ALL
+ * The engine counts a joint angle crossing a threshold, holding, and crossing
+ * back. A seated posture does none of those, so routing it through the engine
+ * would produce a number describing a movement nobody made. Meditation reads
+ * its torso angle in `src/activities/meditation-guidance.ts` instead, which
+ * measures the shoulder-to-hip line directly and says nothing beyond it.
+ *
+ * The triplets name the landmarks that matter for a seated torso - nose,
+ * shoulders, hips - and the readiness block is left permissive because
+ * `requireRestingPosture: false` is correct for a posture that is meant to be
+ * still. These values are held here so the config stays a valid `ExerciseConfig`
+ * alongside every other entry in the registry.
+ */
+export const MEDITATION_POSTURE: ExerciseConfig = {
+  id: 'meditation-posture',
+  name: 'Meditation Posture',
+  sides: ['left', 'right'],
+  triplets: {
+    left: { hip: 'NOSE', knee: 'LEFT_SHOULDER', ankle: 'LEFT_HIP' },
+    right: { hip: 'NOSE', knee: 'RIGHT_SHOULDER', ankle: 'RIGHT_HIP' },
+  },
+  thresholds: {
+    bentAngleDeg: 150,
+    extendedAngleDeg: 170,
+    minRangeDeg: 15,
+    minRepIntervalMs: 10000,
+    holdFrames: 10,
+    minVisibility: 0.5,
+    maxFrameGapMs: 2000,
+  },
+  readiness: {
+    minVisibility: 0.5,
+    maxStableDrift: 0.02,
+    minStableFrames: 20,
+    minStableMs: 3000,
+    maxAnchorDrift: 0.02,
+    anchorDriftSuspendFrames: 3,
+    maxAnchorOffset: 0.1,
+    requireRestingPosture: false,
+  },
+};
+
+/**
  * Camera-tracked exercise configs only (for the exercise catalogue).
  *
  * These are the movements that appear in the exercise list and have dedicated
@@ -447,6 +500,14 @@ const GUIDED_POSE_CONFIGS: Readonly<Record<string, ExerciseConfig>> = {
   [TRUNK_LATERAL_FLEXION.id]: TRUNK_LATERAL_FLEXION,
   [TRUNK_FORWARD_FLEXION.id]: TRUNK_FORWARD_FLEXION,
   [SEATED_HIP_FLEXION.id]: SEATED_HIP_FLEXION,
+  [MEDITATION_POSTURE.id]: MEDITATION_POSTURE,
+  /*
+   * Chair Yoga Flow's "Stand and Sit" step names this config, so it must be
+   * resolvable here. It is the SAME object as the exercise entry above — not a
+   * copy — so the device-verified Sit-to-Stand thresholds are reused exactly,
+   * and tuning the exercise can never drift from the yoga step using it.
+   */
+  [SIT_TO_STAND.id]: SIT_TO_STAND,
 };
 
 /**

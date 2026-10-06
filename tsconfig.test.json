@@ -17,6 +17,7 @@
     "tests/**/*.ts",
     "src/exercise/**/*.ts",
     "src/activities/**/*.ts",
+    "src/data/**/*.ts",
     "src/settings/theme-preference.ts"
   ],
   "exclude": ["node_modules"]

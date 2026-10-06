@@ -10,7 +10,7 @@ export type Point2D = { x: number; y: number };
  * the lookup key (not array index) to stay resilient to upstream ordering.
  */
 export function getLandmark(
-  landmarks: LandmarkEventPayload[],
+  landmarks: readonly LandmarkEventPayload[],
   name: PoseLandmarkName,
 ): LandmarkEventPayload | undefined {
   return landmarks.find((landmark) => landmark.name === name);
