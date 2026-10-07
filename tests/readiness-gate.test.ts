@@ -537,7 +537,9 @@ export function run(): void {
     const base = makePose(90, 90, { visibility: 0.95, presence: 0.95 });
     const occluded = base.map((landmark) => {
       if (landmark.name === 'RIGHT_ANKLE') {
-        return { ...landmark, visibility: 0.4, presence: 0.2 };
+        // Visibility below minVisibility (0.4) is what makes a joint unreadable.
+        // Presence is deliberately left low too, to prove it changes nothing.
+        return { ...landmark, visibility: 0.2, presence: 0 };
       }
       return landmark;
     });

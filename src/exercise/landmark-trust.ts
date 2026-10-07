@@ -26,35 +26,38 @@ import type { LandmarkEventPayload } from '../../modules/pose-tracker';
  *
  * THE POLICY
  * A landmark may only be used for readiness geometry when it is trustworthy
- * as an OBSERVED landmark. That needs both of MediaPipe's per-landmark scores,
- * because they answer different questions:
+ * as an OBSERVED landmark. That is decided by MediaPipe's `visibility` score
+ * alone:
  *
  *  - `visibility` — "visible or occluded by other objects". Collapses to zero
- *    when the landmark leaves the frame entirely.
- *  - `presence`   — "present on the scene (located within scene bounds)",
- *    i.e. whether the landmark is really there at all rather than projected.
+ *    when the landmark leaves the frame entirely, which is exactly the signal
+ *    needed here: a limb the camera cannot see is scored as not visible, so
+ *    the side-grouping below keeps it out of the geometry entirely.
  *
- * A landmark that is visible-but-absent, or present-but-occluded, fails one of
- * the two, so requiring BOTH is what actually distinguishes an observation
- * from an inference. This deliberately does not replace `visibility` with
- * `presence`; they are different facts and both are used.
+ * WHY `presence` IS NOT USED AS A TRUST CRITERION
+ * MediaPipe documents `presence` as an optional per-landmark field that "should
+ * stay unset if not supported", so an absent value and a real zero are
+ * indistinguishable once it reaches JavaScript. More importantly, the model
+ * this app ships does not compute 33 independent presence scores: the bundled
+ * `pose_landmarker_lite.task` emits a single pose-level tensor, `output_poseflag`
+ * ("Presence of pose.", produced by the `conv_poseflag` layer), which MediaPipe
+ * then broadcasts into every landmark's `presence` field.
  *
- * An absent score is delivered natively as `0` (see `LandmarkEvent.kt`), so
- * "the model did not report this" is treated as untrusted. That is the safe
- * direction: it can refuse a legitimate pose, never accept a wrong one.
+ * That makes `presence` a person-level detector confidence wearing a
+ * per-landmark name. Treating it as a per-landmark occlusion test is a category
+ * error, and a real-device capture proved it: on a clearly framed subject the
+ * leg chain scored visibility 0.68 / 0.58 / 0.54 and produced a valid ~175deg
+ * knee angle on a frame where `presence` was 0.00 for all six landmarks, while
+ * the adjacent frame reported `presence` 1.00 everywhere at worse visibility.
+ * Requiring it at 0.5 therefore refused readiness for a correctly positioned
+ * user in 34 of 34 samples.
+ *
+ * Pose-level presence is not being ignored — it is already enforced where
+ * MediaPipe defines it, at the native gate in `PoseTrackerProcessor`
+ * (`setMinPosePresenceConfidence`), which decides whether a pose is returned at
+ * all. `presence` is still carried end to end on the payload as telemetry; it
+ * simply is not a per-landmark trust criterion here.
  */
-
-/**
- * Minimum `presence` for a landmark to count as observed rather than inferred.
- *
- * 0.5 is MediaPipe's own default confidence floor for pose presence
- * (`min_pose_presence_confidence`, and the same 0.5 this module already uses
- * for detection/presence/tracking in `PoseTrackerProcessor`), so it is a
- * documented model convention rather than a number tuned to make a symptom
- * disappear. It is a TRUST floor for readiness only — it does not alter rep
- * detection, which keeps its existing visibility-only semantics.
- */
-export const MIN_TRUSTED_PRESENCE = 0.5;
 
 /** A landmark that is trustworthy enough to decide readiness geometry. */
 export type TrustedLandmark = LandmarkEventPayload;
@@ -62,13 +65,16 @@ export type TrustedLandmark = LandmarkEventPayload;
 /**
  * Whether one landmark may be used for readiness geometry.
  *
- * Requires all four of: it exists, its coordinates are finite, it is visible
- * enough, and it is present enough to be an observation rather than an
- * inference. `minVisibility` is the exercise's own configured floor, so this
- * does not invent a competing visibility threshold.
+ * Requires all three of: it exists, its coordinates and its visibility score
+ * are finite, and it is visible enough. `minVisibility` is the exercise's own
+ * configured floor, so this does not invent a competing visibility threshold.
  *
- * This is the ONLY place visibility/presence are compared for readiness. Any
- * other comparison in exercise code is a bug.
+ * `presence` is deliberately not consulted. See the note at the top of this file:
+ * it is a broadcast pose-level confidence for this model, not a per-landmark
+ * observation, and requiring it refused readiness for correctly positioned users.
+ *
+ * This is the ONLY place landmark scores are compared for readiness. Any other
+ * comparison in exercise code is a bug.
  */
 export function isTrustedLandmark(
   landmark: LandmarkEventPayload | undefined,
@@ -77,9 +83,7 @@ export function isTrustedLandmark(
   if (!landmark) return false;
   if (!Number.isFinite(landmark.x) || !Number.isFinite(landmark.y)) return false;
   if (!Number.isFinite(landmark.visibility)) return false;
-  if (!Number.isFinite(landmark.presence)) return false;
   if (landmark.visibility < minVisibility) return false;
-  if (landmark.presence < MIN_TRUSTED_PRESENCE) return false;
   return true;
 }
 

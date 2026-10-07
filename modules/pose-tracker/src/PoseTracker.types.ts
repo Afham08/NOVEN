@@ -65,11 +65,16 @@ export type LandmarkEventPayload = {
   visibility: number;
   /**
    * MediaPipe "float score of whether landmark is present on the scene
-   * (located within scene bounds)". Carried SEPARATELY from `visibility`,
-   * because a landmark the model inferred for an occluded limb can keep a
-   * usable-looking visibility while its presence shows nothing was really
-   * there. Unset natively is delivered as `0`, i.e. explicitly untrusted —
-   * see `src/exercise/landmark-trust.ts`.
+   * (located within scene bounds)". Optional in the MediaPipe proto, so an
+   * unset score is delivered as `0` and is indistinguishable from a real zero.
+   *
+   * Carried here as TELEMETRY ONLY. It is not a per-landmark trust criterion:
+   * the bundled model emits one pose-level `output_poseflag` tensor that
+   * MediaPipe broadcasts into every landmark, so this value cannot say whether
+   * any individual joint was actually seen. Pose-level presence is enforced
+   * natively instead, via `setMinPosePresenceConfidence` in
+   * `PoseTrackerProcessor.kt`. Readiness trust uses `visibility` — see
+   * `src/exercise/landmark-trust.ts`.
    */
   presence: number;
 };
