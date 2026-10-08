@@ -10,6 +10,7 @@ import { Screen } from '@/components/layout/screen';
 import { CameraPlaceholder } from '@/components/session/camera-placeholder';
 import { SessionTimer } from '@/components/session/session-timer';
 import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
 import { Header } from '@/components/ui/header';
 import { StatusChip } from '@/components/ui/status-chip';
 import { Radius, Spacing, Type } from '@/constants/theme';
@@ -22,6 +23,7 @@ import { sessionPhaseLabel, type SessionPhase } from '@/exercise/session-phase';
 import { sessionStore } from '@/exercise/session-storage';
 import { SessionEngine } from '@/exercise/session-engine';
 import { createExpoSpeechSink, VoiceFeedbackController } from '@/exercise/voice-feedback';
+import { useTheme } from '@/hooks/use-theme';
 
 type HudState = {
   reps: number;
@@ -32,6 +34,7 @@ export default function SessionScreen() {
   const { id } = useLocalSearchParams<{ id?: string }>();
   const router = useRouter();
   const exercise = getExerciseById(id);
+  const theme = useTheme();
 
   const [seconds, setSeconds] = useState(0);
   const [phase, setPhase] = useState<SessionPhase>('ready');
@@ -42,7 +45,6 @@ export default function SessionScreen() {
   });
 
   const phaseRef = useRef<SessionPhase>('ready');
-  const secondsRef = useRef(0);
 
   /**
    * Phase is mirrored into a ref because `onPoseFrame` fires ~10x/s from the
@@ -79,7 +81,7 @@ export default function SessionScreen() {
   /**
    * Voice is a second channel for the SAME per-frame decision the HUD renders,
    * not a parallel state machine: both read `SessionFrameResult`. All throttling
-   * lives inside the controller, so it is safe to hand it every frame — it speaks
+   * lives inside the controller, so it is safe to hand it every frame â€” it speaks
    * only on a genuine state change or on a rep the detector actually completed.
    *
    * The controller is created and torn down by the effect below and reached only
@@ -114,18 +116,6 @@ export default function SessionScreen() {
     leavingRef.current = true;
     router.replace('/');
   };
-
-  useEffect(() => {
-    if (phase !== 'running') return;
-    const interval = setInterval(() => {
-      setSeconds((s) => {
-        const next = s + 1;
-        secondsRef.current = next;
-        return next;
-      });
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [phase]);
 
   const requestCameraPermission = useCallback(async () => {
     if (Platform.OS !== 'android') {
@@ -164,7 +154,7 @@ export default function SessionScreen() {
 
   /**
    * The pose-tracker view also emits a low-level `onFrame` camera event that
-   * NOVEN has no consumer for — all exercise logic runs off `onPoseFrame`.
+   * NOVEN has no consumer for â€” all exercise logic runs off `onPoseFrame`.
    * The prop is still declared required by PoseTrackerViewProps, so an inert
    * handler is passed rather than omitting it (dropping the listener would need
    * a device to confirm the native dispatcher tolerates it). This is the only
@@ -172,6 +162,13 @@ export default function SessionScreen() {
    */
   const handleFrame = useCallback(() => {}, []);
 
+  /**
+   * Every pose frame the tracker emits carries the engine's own elapsed answer.
+   * There is deliberately NO interval on this screen: the seconds shown are the
+   * engine's readiness-driven active time, and they change exactly when a frame
+   * reports a new whole second. `setSeconds` with an unchanged value is a
+   * no-op render, so the ~10 frames/s cost nothing when the clock is static.
+   */
   const handlePoseFrame = useCallback(
     (event: { nativeEvent: PoseFrameEventPayload }) => {
       // Phase is mirrored into a ref because `onPoseFrame` fires ~10x/s from the
@@ -181,6 +178,7 @@ export default function SessionScreen() {
       if (phaseRef.current !== 'running') return;
       if (!engine) return;
       const result = engine.handlePoseFrame(event);
+      setSeconds(result.elapsedSeconds);
       updateHud(result);
       // Speech is handed the engine's own decision rather than the rendered HUD
       // value, and the controller decides whether that decision is worth saying.
@@ -198,12 +196,18 @@ export default function SessionScreen() {
     );
   }
 
+  /**
+   * Start is one-shot: the phase ref flips synchronously inside goToPhase, so a
+   * second press in the same frame sees 'running' and is ignored. It only arms
+   * the session â€” the clock stays at 0 until the first 'ready' pose frame banks
+   * time, because the engine decides when the exercise position is actually held.
+   */
   const start = () => {
+    if (phaseRef.current !== 'ready') return;
     engine?.reset();
     // Clear any throttling left over from a previous attempt so the first cue of
     // the new session is not swallowed by a cooldown.
     voiceRef.current?.reset();
-    secondsRef.current = 0;
     setSeconds(0);
     setHud({ reps: 0, feedback: setupFeedback() });
     goToPhase('running');
@@ -213,8 +217,10 @@ export default function SessionScreen() {
   const pause = () => {
     // Freeze the in-progress rep cycle so the movement that caused the pause
     // cannot be completed by the frames that follow it. Counted reps survive.
-    // The HUD is not updated while paused (no pose frames are consumed), so the
-    // engine also releases any held praise here instead of leaving it on screen.
+    // The engine also drops its clock anchor here, so the paused gap can never
+    // be banked as active time when frames resume. The HUD is not updated while
+    // paused (no pose frames are consumed), so the engine also releases any held
+    // praise here instead of leaving it on screen.
     if (engine) updateHud(engine.pause());
     goToPhase('paused');
     voiceRef.current?.announcePause();
@@ -238,9 +244,11 @@ export default function SessionScreen() {
 
     const metrics = buildSessionMetrics({
       reps: engine?.reps ?? 0,
-      // Read the ref, not the render closure: `seconds` can be up to one tick
-      // stale at the instant End is pressed, which would under-report duration.
-      durationSeconds: secondsRef.current,
+      // The engine is the single source of elapsed time: active seconds in the
+      // exercise position, not wall-clock time since Start. There is no
+      // secondsRef to go stale â€” the value the timer has been showing and the
+      // value recorded here are the same number, from the same object.
+      durationSeconds: engine?.elapsedSeconds ?? 0,
       repRanges: engine?.repRanges ?? [],
       rangeMinDeg: range?.min ?? null,
       rangeMaxDeg: range?.max ?? null,
@@ -287,7 +295,7 @@ export default function SessionScreen() {
         }),
       )
       .catch(() => {
-        // Intentionally swallowed — see above.
+        // Intentionally swallowed â€” see above.
       });
 
     router.push({
@@ -307,7 +315,7 @@ export default function SessionScreen() {
   const chipTone = phase === 'ready' || phase === 'completed' ? 'ready' : 'accent';
 
   // The HUD states the phase in words rather than relying on the chip, a colour,
-  // or the timer — none of which are readable from across a room.
+  // or the timer â€” none of which are readable from across a room.
   const phaseBanner =
     phase === 'paused' ? 'PAUSED' : phase === 'completed' ? 'SESSION COMPLETE' : null;
 
@@ -320,21 +328,28 @@ export default function SessionScreen() {
         ? pausedFeedback().text
         : hud.feedback.text;
 
-  return (
+   return (
     <Screen contentStyle={styles.content}>
-      <Header title={exercise.name} />
+      <Text numberOfLines={1} ellipsizeMode="tail" style={[styles.exerciseName, { color: theme.heading }]}>
+        {exercise.name}
+      </Text>
 
+      {/*
+        The camera, unobstructed. The HUD used to be drawn ON TOP of the preview
+        â€” a scrim and giant type over the video â€” which hid the person the whole
+        screen exists to show. The layout is now a clean stack: camera first,
+        then phase and clock, then guidance, then the controls. Nothing overlays
+        the preview, and the tracker keeps its own full-width 1:1 frame.
+      */}
       {hasCameraPermission ? (
         <View style={styles.cameraFrame}>
           {/*
             The tracker is unmounted once the session is over. The result screen
-            is PUSHED, so this screen stays mounted behind it — and the native
+            is PUSHED, so this screen stays mounted behind it â€” and the native
             module only releases the camera / stops MediaPipe inference from
             OnViewDestroys, i.e. on a real unmount. Leaving the tracker mounted
             would keep the camera indicator lit and burn CPU on pose inference
-            for the whole time the result screen is open. The 1:1 frame and the
-            rest of the live-session layout are untouched; only the overlay drawn
-            on top of the preview changed, to make it readable from a distance.
+            for the whole time the result screen is open.
           */}
           {phase === 'completed' ? null : (
             <PoseTrackerView
@@ -343,68 +358,62 @@ export default function SessionScreen() {
               onPoseFrame={handlePoseFrame}
             />
           )}
-          <View
-            pointerEvents="none"
-            style={[styles.hudOverlay, phase === 'ready' ? styles.hudOverlayCentered : null]}>
-            {/*
-              Distance-readable HUD.
-
-              The user is several feet from the phone with the screen facing away
-              or at an angle, so the running state leads with a single dominant
-              number and one short imperative underneath. Everything here is
-              derived from the same `hud` state the engine produced this frame —
-              there is no second source of truth.
-
-              Contrast is carried by a solid scrim plus warm-white text rather than
-              colour, so the HUD stays legible over any camera content and never
-              depends on colour alone. `allowsFontScaling` is left on deliberately:
-              enlarging the text is a feature for this audience.
-            */}
-            {phase === 'ready' ? (
-              <View style={styles.readyPanel}>
-                <Text style={styles.readyTitle}>GET READY</Text>
-                <Text style={styles.readyLine}>Sit sideways to the camera</Text>
-                <Text style={styles.readyHint}>
-                  Keep your full upper body and legs visible
-                </Text>
-              </View>
-            ) : (
-              <View style={styles.runPanel}>
-                {phaseBanner ? (
-                  <Text accessibilityRole="header" style={styles.phaseBanner}>
-                    {phaseBanner}
-                  </Text>
-                ) : null}
-                <Text style={styles.repsLabel}>REPS</Text>
-                <Text
-                  accessibilityLabel={`${hud.reps} ${hud.reps === 1 ? 'rep' : 'reps'}`}
-                  style={styles.repsValue}>
-                  {hud.reps}
-                </Text>
-                <Text numberOfLines={2} style={styles.instruction}>
-                  {instructionText}
-                </Text>
-              </View>
-            )}
-          </View>
         </View>
       ) : (
         <CameraPlaceholder />
       )}
 
-      <StatusChip label={chipLabel} tone={chipTone} />
-      <SessionTimer
-        seconds={seconds}
-        phase={phase}
-        suggestedSeconds={exercise.durationSeconds}
-      />
+      {/*
+        Guidance lives below the camera instead of over the video: the phase
+        banner when paused or complete, the running rep count plus the engine's
+        own instruction while exercising, and the setup line before Start.
+      */}
+      {phase !== 'ready' && (
+        <View style={styles.infoBar}>
+          <View style={styles.infoBarLeft}>
+            <SessionTimer
+              seconds={seconds}
+              phase={phase}
+              suggestedSeconds={exercise.durationSeconds}
+            />
+          </View>
+          <View style={styles.infoBarRight}>
+            <Text numberOfLines={2} style={[styles.infoBarLabel, { color: theme.textSecondary }]}>GUIDANCE</Text>
+            <Text numberOfLines={2} style={[styles.infoBarValue, { color: theme.text }]}>{instructionText}</Text>
+          </View>
+        </View>
+      )}
+
+      {phase !== 'ready' && (
+        <Card variant="surface" padding="medium" style={styles.instructions}>
+          <Text style={[styles.instructionsTitle, { color: theme.heading }]}>Instructions</Text>
+          {exercise.instructions.map((instruction, index) => (
+            <View key={index} style={styles.instructionItem}>
+              <Text style={[styles.instructionBullet, { color: theme.accent }]}>â€¢</Text>
+              <Text style={[styles.instructionStep, { color: theme.text }]}>{instruction}</Text>
+            </View>
+          ))}
+        </Card>
+      )}
+
+      {phase === 'ready' && (
+        <Card variant="surface" padding="medium" style={styles.instructions}>
+          <Text style={[styles.instructionsTitle, { color: theme.heading }]}>Instructions</Text>
+          {exercise.instructions.map((instruction, index) => (
+            <View key={index} style={styles.instructionItem}>
+              <Text style={[styles.instructionBullet, { color: theme.accent }]}>â€¢</Text>
+              <Text style={[styles.instructionStep, { color: theme.text }]}>{instruction}</Text>
+            </View>
+          ))}
+        </Card>
+      )}
 
       {/*
         A completed session is terminal: the frozen metrics were already handed
         to the pushed result screen, so Pause/Resume must not be offered here or
         back-navigation could restart the timer and re-open counting. The result
         screen is pushed rather than replaced, so this screen remains reachable
-        by pressing Back — it therefore needs its own way out, mirroring the
+        by pressing Back â€” it therefore needs its own way out, mirroring the
         result screen's Done button, instead of being a dead end.
       */}
       {phase === 'completed' ? (
@@ -416,7 +425,9 @@ export default function SessionScreen() {
         // permission is pending or denied the CameraPlaceholder above already
         // explains what is needed.
         hasCameraPermission ? (
-          <Button variant="primary" title="Start" onPress={start} />
+          <View style={styles.startButtonWrapper}>
+            <Button variant="primary" title="Start" onPress={start} />
+          </View>
         ) : null
       ) : (
         <View style={styles.controlsRow}>
@@ -442,8 +453,11 @@ export default function SessionScreen() {
 
 const styles = StyleSheet.create({
   content: {
-    gap: Spacing.three,
-    paddingVertical: Spacing.three,
+    // paddingTop only: paddingVertical here would overwrite Screen's own bottom
+    // inset (see Screen), and the controls must never sit under Android's
+    // gesture-navigation strip.
+    gap: Spacing.four,
+    paddingTop: Spacing.three,
   },
   cameraFrame: {
     width: '100%',
@@ -459,90 +473,126 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
   },
-  hudOverlay: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    top: 0,
-    bottom: 0,
-    justifyContent: 'flex-end',
+  exerciseName: {
+    ...Type.heading,
+    width: '100%',
+    textAlign: 'center',
   },
-  hudOverlayCentered: {
+  startButtonWrapper: {
+    width: '100%',
+  },
+  chipRow: {
+    flexDirection: 'row',
     justifyContent: 'center',
   },
-  readyPanel: {
+  guidance: {
     alignItems: 'center',
     gap: Spacing.two,
-    margin: Spacing.four,
-    paddingVertical: Spacing.five,
-    paddingHorizontal: Spacing.six,
-    borderRadius: Radius.card,
-    backgroundColor: 'rgba(18, 20, 19, 0.74)',
   },
-  readyTitle: {
+  guidanceTitle: {
     ...Type.heading,
-    fontSize: 40,
-    lineHeight: 48,
+    fontSize: 28,
+    lineHeight: 36,
     fontWeight: '800',
-    color: '#FAF9F6',
+    letterSpacing: 2,
     textAlign: 'center',
-    letterSpacing: 1,
+  },
+  phaseBanner: {
+    ...Type.heading,
+    fontSize: 30,
+    lineHeight: 38,
+    fontWeight: '800',
+    letterSpacing: 3,
+    textAlign: 'center',
+  },
+  repsLabel: {
+    ...Type.label,
+    fontSize: 18,
+    lineHeight: 26,
+    fontWeight: '800',
+    letterSpacing: 4,
+    textAlign: 'center',
+  },
+  repsValue: {
+    fontSize: 64,
+    lineHeight: 72,
+    fontWeight: '800',
+    textAlign: 'center',
+    fontVariant: ['tabular-nums'],
   },
   readyLine: {
-    ...Type.bodyEmphasis,
-    fontSize: 24,
-    lineHeight: 32,
-    fontWeight: '700',
-    color: '#FAF9F6',
+    ...Type.subheading,
+    fontWeight: '600',
+    lineHeight: 30,
     textAlign: 'center',
   },
   readyHint: {
     ...Type.body,
-    fontSize: 19,
-    lineHeight: 26,
-    fontWeight: '500',
-    color: '#E7EFEB',
+    lineHeight: 24,
     textAlign: 'center',
-  },
-  runPanel: {
-    alignItems: 'center',
-    gap: Spacing.one,
-    paddingVertical: Spacing.two,
-    paddingHorizontal: Spacing.four,
-    backgroundColor: 'rgba(18, 20, 19, 0.80)',
-  },
-  phaseBanner: {
-    ...Type.heading,
-    fontSize: 32,
-    lineHeight: 40,
-    fontWeight: '800',
-    color: '#FAF9F6',
-    textAlign: 'center',
-    letterSpacing: 3,
-  },
-  repsLabel: {
-    ...Type.label,
-    fontSize: 20,
-    lineHeight: 26,
-    fontWeight: '800',
-    color: '#FAF9F6',
-    letterSpacing: 5,
-  },
-  repsValue: {
-    fontSize: 84,
-    lineHeight: 90,
-    fontWeight: '800',
-    color: '#FAF9F6',
-    textAlign: 'center',
-    fontVariant: ['tabular-nums'],
   },
   instruction: {
-    ...Type.bodyEmphasis,
-    fontSize: 28,
-    lineHeight: 34,
-    fontWeight: '700',
-    color: '#FAF9F6',
+    ...Type.subheading,
+    fontWeight: '600',
+    lineHeight: 30,
     textAlign: 'center',
+    paddingHorizontal: Spacing.two,
+  },
+  instructionBullet: {
+    marginRight: Spacing.two,
+    fontSize: 18,
+    lineHeight: 24,
+    fontWeight: '800',
+  },
+  instructionItem: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.two,
+    width: '100%',
+  },
+  instructionStep: {
+    ...Type.body,
+    lineHeight: 22,
+    flex: 1,
+  },
+  instructions: {
+    gap: Spacing.two,
+    width: '100%',
+  },
+  instructionsTitle: {
+    ...Type.heading,
+    fontSize: 20,
+    lineHeight: 28,
+    fontWeight: '800',
+  },
+
+  infoBar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    width: '100%',
+    paddingHorizontal: Spacing.two,
+    gap: Spacing.three,
+  },
+  infoBarLeft: {
+    flex: 1,
+    alignItems: 'flex-start',
+  },
+  infoBarRight: {
+    flex: 2,
+    alignItems: 'flex-end',
+  },
+  infoBarLabel: {
+    ...Type.label,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '800',
+    letterSpacing: 2,
+  },
+  infoBarValue: {
+    ...Type.subheading,
+    fontWeight: '600',
+    lineHeight: 24,
   },
   controlsRow: {
     flexDirection: 'row',

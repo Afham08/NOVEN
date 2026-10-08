@@ -7,6 +7,7 @@ import { run as runBreathCycle } from './breath-cycle.test';
 import { run as runCoachingFeedback } from './coaching-feedback.test';
 import { run as runCompletionOwnership } from './completion-ownership.test';
 import { run as runExerciseLibrary } from './exercise-library.test';
+import { run as runExerciseTimer } from './exercise-timer.test';
 import { run as runGuidedCompletion } from './guided-completion.test';
 import { run as runHistoryFormat } from './history-format.test';
 import { run as runLandmarkTrust } from './landmark-trust.test';
@@ -39,6 +40,7 @@ async function main(): Promise<void> {
   runCoachingFeedback();
   runCompletionOwnership();
   runExerciseLibrary();
+  runExerciseTimer();
   runGuidedCompletion();
   runHistoryFormat();
   runLandmarkTrust();
