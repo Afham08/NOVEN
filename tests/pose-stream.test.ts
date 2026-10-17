@@ -64,8 +64,10 @@ function pose(
     const { hip, knee } = SIDE_GEOMETRY[side];
     const names = SIDE_NAMES[side];
     const ankle = ankleFor(hip, knee, side === 'left' ? leftAngle : rightAngle);
-    // Per-side scores let a test dim or un-present exactly one side, which is
-    // how "the far leg is inferred, the near leg is observed" is expressed.
+    // Per-side scores let a test dim or zero exactly one side, which is how
+    // "the far leg is unreadable, the near leg is observed" is expressed.
+    // Visibility is what decides readability; presence is carried only so a
+    // test can prove it no longer gates anything.
     const sideVisibility = side === 'right' ? (opts.rightVisibility ?? visibility) : visibility;
     const sidePresence = side === 'right' ? (opts.rightPresence ?? presence) : presence;
     for (const [name, point] of [[names.hip, hip], [names.knee, knee], [names.ankle, ankle]] as const) {
@@ -270,26 +272,31 @@ export function run(): void {
     check('near-side defect: no rep from the unusable leg', nearBroken.reps === 0);
     check('near-side defect: far side still keeps the gate ready', nearBroken.readinessPhase === 'ready');
 
-    // Presence is the other half of the trust decision: a landmark the model
-    // projects but does not actually see is an inference, not an observation.
-    const inferred = new SessionEngine(SEATED_KNEE_EXTENSION);
-    let pt = reachReady(inferred);
+    // Presence is TELEMETRY, not a trust criterion. The bundled model emits one
+    // pose-level `output_poseflag` tensor that MediaPipe broadcasts into every
+    // landmark, so on a real device a correctly framed subject reported presence
+    // 0.00 on every landmark while visibility was healthy and the knee geometry
+    // was valid. Gating on it suspended counting for 34 of 34 captured samples.
+    // Low visibility (see the `dim` case above) is the signal that actually means
+    // "the model is inferring this limb".
+    const presenceZero = new SessionEngine(SEATED_KNEE_EXTENSION);
+    let pzt = reachReady(presenceZero);
     for (const angle of REP_CADENCE) {
-      inferred.handlePoseFrame(frame(pose(angle, REST, { presence: 0.1 }), pt));
-      pt += 100;
+      presenceZero.handlePoseFrame(frame(pose(angle, REST, { presence: 0 }), pzt));
+      pzt += 100;
     }
-    check('absent presence never counts a rep', inferred.reps === 0);
-    check('absent presence suspends counting', inferred.readinessPhase === 'waiting');
+    check('presence 0 throughout still counts the rep', presenceZero.reps === 1, `reps=${presenceZero.reps}`);
+    check('presence 0 throughout leaves counting running', presenceZero.readinessPhase === 'ready', presenceZero.readinessPhase);
 
-    // ...and only ONE side inferred still leaves the other side usable.
-    const oneInferred = new SessionEngine(SEATED_KNEE_EXTENSION);
-    let ot = reachReady(oneInferred);
+    // ...and the same holds when only one side reports presence 0.
+    const oneSidePresenceZero = new SessionEngine(SEATED_KNEE_EXTENSION);
+    let opzt = reachReady(oneSidePresenceZero);
     for (const angle of REP_CADENCE) {
-      oneInferred.handlePoseFrame(frame(pose(angle, REST, { rightPresence: 0.1 }), ot));
-      ot += 100;
+      oneSidePresenceZero.handlePoseFrame(frame(pose(angle, REST, { rightPresence: 0 }), opzt));
+      opzt += 100;
     }
-    check('one inferred side: near-side rep still counts', oneInferred.reps === 1);
-    check('one inferred side: gate stays ready', oneInferred.readinessPhase === 'ready');
+    check('one side at presence 0: near-side rep still counts', oneSidePresenceZero.reps === 1, `reps=${oneSidePresenceZero.reps}`);
+    check('one side at presence 0: gate stays ready', oneSidePresenceZero.readinessPhase === 'ready', oneSidePresenceZero.readinessPhase);
   });
 
   suite('pipeline G: a tracking stall cannot join frames into a rep', () => {

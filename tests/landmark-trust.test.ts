@@ -2,7 +2,7 @@ import type { LandmarkEventPayload, PoseFrameEventPayload, PoseLandmarkName } fr
 import { check, suite } from './harness';
 
 import { SEATED_KNEE_EXTENSION } from '../src/exercise/configs';
-import { isTrustedLandmark, isTrustedSide, MIN_TRUSTED_PRESENCE } from '../src/exercise/landmark-trust';
+import { isTrustedLandmark, isTrustedSide } from '../src/exercise/landmark-trust';
 import { SEATED_ARM_RAISE, SIT_TO_STAND } from '../src/exercise/pose-configs';
 import { SessionEngine } from '../src/exercise/session-engine';
 import type { ExerciseConfig, Side } from '../src/exercise/types';
@@ -65,14 +65,14 @@ type SideScores = { visibility: number; presence: number };
 
 type PoseOpts = {
   /** Overrides for one side only; anything not named uses `scores`. */
-  scores?: SideScores;
+  scores?: Partial<SideScores>;
   leftScores?: Partial<SideScores>;
   rightScores?: Partial<SideScores>;
   /** Per-landmark overrides, used to prove untrustworthy points cannot decide. */
   jitter?: Record<string, number>;
 };
 
-function merge(scores: SideScores | undefined, partial: Partial<SideScores> | undefined): SideScores {
+function merge(scores: Partial<SideScores> | undefined, partial: Partial<SideScores> | undefined): SideScores {
   return {
     visibility: partial?.visibility ?? scores?.visibility ?? 1,
     presence: partial?.presence ?? scores?.presence ?? 1,
@@ -158,8 +158,6 @@ const CAMERA_CONFIGS: readonly ExerciseConfig[] = [
 
 export function run(): void {
   suite('trust policy: a landmark is trusted only as an observation', () => {
-    check('presence floor is the documented model default', MIN_TRUSTED_PRESENCE === 0.5);
-
     const good: LandmarkEventPayload = {
       name: 'LEFT_HIP',
       x: 0.4,
@@ -168,20 +166,32 @@ export function run(): void {
       visibility: 0.9,
       presence: 0.9,
     };
-    check('a visible, present landmark is trusted', isTrustedLandmark(good, 0.4));
+    check('a visible landmark is trusted', isTrustedLandmark(good, 0.4));
 
     check(
       'a landmark below the visibility floor is untrusted',
       !isTrustedLandmark({ ...good, visibility: 0.2 }, 0.4),
     );
+
+    // REGRESSION, from the real-device capture. The bundled model emits ONE
+    // pose-level presence flag that MediaPipe broadcasts into every landmark, so
+    // a clearly visible subject could report presence 0.00 on a frame whose leg
+    // chain scored visibility 0.68 / 0.58 / 0.54 and produced a valid ~175deg
+    // knee angle. Presence is telemetry, never a trust criterion: visibility is
+    // the only per-landmark observation signal.
     check(
-      'a visible but absent landmark is untrusted: projected, not seen',
-      !isTrustedLandmark({ ...good, presence: 0.1 }, 0.4),
+      'a visible landmark with presence 0 is still trusted',
+      isTrustedLandmark({ ...good, presence: 0 }, 0.4),
     );
     check(
-      'a landmark the model did not report presence for is untrusted',
-      !isTrustedLandmark({ ...good, presence: 0 }, 0.4),
+      'a visible landmark with low presence is still trusted',
+      isTrustedLandmark({ ...good, presence: 0.1 }, 0.4),
     );
+    check(
+      'presence cannot rescue a landmark below the visibility floor',
+      !isTrustedLandmark({ ...good, visibility: 0.2, presence: 1 }, 0.4),
+    );
+
     check(
       'non-finite coordinates are untrusted whatever the scores say',
       !isTrustedLandmark({ ...good, x: Number.NaN }, 0.4),
@@ -207,12 +217,16 @@ export function run(): void {
     }));
     check('a complete observed side is trustworthy', isTrustedSide(landmarks, jointNames, 0.4));
     check(
-      'one inferred joint makes the whole side untrustworthy',
+      'one dim joint makes the whole side untrustworthy',
       !isTrustedSide(
-        landmarks.map((landmark) => (landmark.name === 'LEFT_ANKLE' ? { ...landmark, presence: 0 } : landmark)),
+        landmarks.map((landmark) => (landmark.name === 'LEFT_ANKLE' ? { ...landmark, visibility: 0.2 } : landmark)),
         jointNames,
         0.4,
       ),
+    );
+    check(
+      'a side whose presence is 0 throughout is still trustworthy',
+      isTrustedSide(landmarks.map((landmark) => ({ ...landmark, presence: 0 })), jointNames, 0.4),
     );
   });
 
@@ -221,10 +235,10 @@ export function run(): void {
     const extended = extendedAngles();
 
     suite(`${config.id}: an occluded far side cannot veto readiness`, () => {
-      // THE DEVICE SYMPTOM. One side fully observed, the other inferred. The
+      // THE DEVICE SYMPTOM. One side fully observed, the other unreadable. The
       // observed side is a measurement, so it may grant readiness on its own.
       const occluded = new SessionEngine(config);
-      settle(occluded, config, rest, { rightScores: { presence: 0 } });
+      settle(occluded, config, rest, { rightScores: { visibility: 0.2 } });
       check('readiness is granted from the observed side alone', occluded.readinessPhase === 'ready', occluded.readinessPhase);
       check('no rep is invented while settling', occluded.reps === 0);
 
@@ -232,26 +246,34 @@ export function run(): void {
       // other side still carries readiness, and nothing is counted from the
       // unreadable one.
       const nearUnusable = new SessionEngine(config);
-      settle(nearUnusable, config, rest, { leftScores: { presence: 0 } });
+      settle(nearUnusable, config, rest, { leftScores: { visibility: 0.2 } });
       check('readiness is granted from the remaining observed side', nearUnusable.readinessPhase === 'ready', nearUnusable.readinessPhase);
       check('no rep is invented from an unreadable side', nearUnusable.reps === 0);
 
-      // Low visibility on one side is the same case: an occluded limb the model
-      // still reports coordinates for.
+      // Low visibility is the signal that means "the model is inferring this
+      // limb". Presence is not: the bundled model emits one pose-level flag that
+      // is broadcast into every landmark, so a side reported at presence 0 is not
+      // thereby unreadable — proven below, where a presence-0 pose still gets
+      // ready. A dim far side must not block readiness.
       const dimSide = new SessionEngine(config);
       settle(dimSide, config, rest, { rightScores: { visibility: 0.2 } });
       check('a dim far side does not block readiness', dimSide.readinessPhase === 'ready', dimSide.readinessPhase);
+
+      // THE DEVICE BUG, restated. The whole pose reported presence 0 on every
+      // landmark while visibility was healthy and the knee geometry was valid.
+      // That is telemetry, not a defect, and it must not cost the user readiness.
+      const allPresenceZero = new SessionEngine(config);
+      settle(allPresenceZero, config, rest, { scores: { visibility: 1, presence: 0 } });
+      check('a pose reporting presence 0 throughout is still granted readiness', allPresenceZero.readinessPhase === 'ready', allPresenceZero.readinessPhase);
     });
 
     suite(`${config.id}: no trustworthy side blocks readiness`, () => {
-      const inferredBoth = new SessionEngine(config);
-      settle(inferredBoth, config, rest, { scores: { visibility: 1, presence: 0 } });
-      check('an all-inferred pose never becomes ready', inferredBoth.readinessPhase !== 'ready', inferredBoth.readinessPhase);
-      check('an all-inferred pose counts nothing', inferredBoth.reps === 0);
-
+      // Visibility is the only per-landmark signal, so a pose where every
+      // required joint is too dim to be an observation never becomes ready.
       const dimBoth = new SessionEngine(config);
-      settle(dimBoth, config, rest, { scores: { visibility: 0.2, presence: 1 } });
+      settle(dimBoth, config, rest, { scores: { visibility: 0.2 } });
       check('an all-dim pose never becomes ready', dimBoth.readinessPhase !== 'ready', dimBoth.readinessPhase);
+      check('an all-dim pose counts nothing', dimBoth.reps === 0);
 
       // Losing every required joint is the crudest form of the same thing.
       const empty = new SessionEngine(config);
@@ -287,30 +309,31 @@ export function run(): void {
       check('agreement in the starting posture is granted', agreed.readinessPhase === 'ready', agreed.readinessPhase);
     });
 
-    suite(`${config.id}: standing cannot hide behind an inferred side`, () => {
-      // One side standing, one side inferred. Only the inferred side would read
-      // bent, and an inferred side is not allowed to vote at all, so readiness
-      // stays refused rather than being granted by the untrustworthy reading.
+    suite(`${config.id}: standing cannot hide behind an unreadable side`, () => {
+      // One side standing, one side too dim to read. Only the unreadable side
+      // would read bent, and an untrustworthy side is not allowed to vote at
+      // all, so readiness stays refused rather than being granted by the
+      // untrustworthy reading.
       const mixed = new SessionEngine(config);
-      settle(mixed, config, { left: 178, right: 90 }, { rightScores: { presence: 0 } });
-      check('an inferred bent reading cannot grant readiness', mixed.readinessPhase !== 'ready', mixed.readinessPhase);
-      check('an inferred bent reading counts no rep', mixed.reps === 0);
+      settle(mixed, config, { left: 178, right: 90 }, { rightScores: { visibility: 0.2 } });
+      check('an unreadable bent reading cannot grant readiness', mixed.readinessPhase !== 'ready', mixed.readinessPhase);
+      check('an unreadable bent reading counts no rep', mixed.reps === 0);
     });
 
     suite(`${config.id}: stillness is measured only on trustworthy landmarks`, () => {
-      // A still body whose INFERRED landmarks wander frame to frame. The wander
-      // must not reset the calm window, because an untrusted point is not
+      // A still body whose UNTRUSTWORTHY landmarks wander frame to frame. The
+      // wander must not reset the calm window, because an untrusted point is not
       // allowed to describe motion.
       const noisyInference = new SessionEngine(config);
       let t = 0;
       for (let i = 0; i < 14; i += 1) {
         const wobble = i % 2 === 0 ? 0.2 : -0.2;
         noisyInference.handlePoseFrame(
-          frame(buildPose(config, rest, { rightScores: { presence: 0 }, jitter: { RIGHT_HIP: wobble, RIGHT_KNEE: wobble, RIGHT_ANKLE: wobble } }), t),
+          frame(buildPose(config, rest, { rightScores: { visibility: 0.2 }, jitter: { RIGHT_HIP: wobble, RIGHT_KNEE: wobble, RIGHT_ANKLE: wobble } }), t),
         );
         t += 100;
       }
-      check('noise on inferred landmarks never destabilizes the window', noisyInference.readinessPhase === 'ready', noisyInference.readinessPhase);
+      check('noise on untrusted landmarks never destabilizes the window', noisyInference.readinessPhase === 'ready', noisyInference.readinessPhase);
 
       // The control: the same noise on the OBSERVED side is real motion and must
       // be caught, or the previous check would pass for the wrong reason.
