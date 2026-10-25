@@ -646,7 +646,7 @@ check(
  * thing on screen they are most likely to be looking at.
  * ---------------------------------------------------------------------------
  */
-const SESSION_PHASES: readonly SessionPhase[] = ['ready', 'running', 'paused', 'completed'];
+const SESSION_PHASES: readonly SessionPhase[] = ['ready', 'running', 'paused', 'completed', 'tracking-error'];
 
 suite('session: every phase is described honestly, and both indicators agree', () => {
   /*
@@ -663,6 +663,7 @@ suite('session: every phase is described honestly, and both indicators agree', (
   check('a finished session is not called paused', sessionTimerCaption('completed') !== 'Session paused');
   check('a paused session still says so', sessionTimerCaption('paused') === 'Session paused');
   check('the running caption is unchanged', sessionTimerCaption('running') === 'Session in progress');
+  check('fatal tracking failure has its own caption', sessionTimerCaption('tracking-error') === 'Tracking stopped');
 
   /*
    * The caption has to name the state, not merely avoid the wrong word: "Done",
@@ -674,7 +675,8 @@ suite('session: every phase is described honestly, and both indicators agree', (
     sessionTimerCaption('ready').includes('Ready') &&
       sessionTimerCaption('running').includes('progress') &&
       sessionTimerCaption('paused').includes('paused') &&
-      sessionTimerCaption('completed').includes('complete'),
+      sessionTimerCaption('completed').includes('complete') &&
+      sessionTimerCaption('tracking-error').includes('Tracking stopped'),
     SESSION_PHASES.map((phase) => `${phase} -> "${sessionTimerCaption(phase)}"`).join(' | '),
   );
   check(
@@ -704,7 +706,8 @@ suite('session: every phase is described honestly, and both indicators agree', (
     'the chip keeps the wording people are used to',
     sessionPhaseLabel('ready') === 'Ready' &&
       sessionPhaseLabel('paused') === 'Paused' &&
-      sessionPhaseLabel('completed') === 'Session complete',
+      sessionPhaseLabel('completed') === 'Session complete' &&
+      sessionPhaseLabel('tracking-error') === 'Tracking stopped',
     SESSION_PHASES.map((phase) => `${phase} -> "${sessionPhaseLabel(phase)}"`).join(' | '),
   );
 });
@@ -731,7 +734,7 @@ suite('session: the timer is wired to the phase, not to a two-state flag', () =>
   const shared = fs.readFileSync(fromSrc('exercise', 'session-phase.ts'), 'utf8');
   check(
     'the phases are declared exactly once',
-    /export type SessionPhase = 'ready' \| 'running' \| 'paused' \| 'completed';/.test(shared) &&
+    /export type SessionPhase = 'ready' \| 'running' \| 'paused' \| 'completed' \| 'tracking-error';/.test(shared) &&
       !/type SessionPhase\s*=/.test(screen) &&
       !/type SessionPhase\s*=/.test(timer),
     shared,

@@ -19,11 +19,6 @@ export type ScoreCardProps = {
   trailing?: ReactNode;
 };
 
-const INVERSE_NUMBER = {
-  accent: '#F58A5F',
-  sage: '#86AC9D',
-} as const;
-
 export function ScoreCard({
   score,
   max = 100,
@@ -40,10 +35,14 @@ export function ScoreCard({
   const pct = hasScore ? Math.max(0, Math.min(100, (score / max) * 100)) : 0;
 
   const cardBackground = inverse ? theme.surfaceInverse : theme.backgroundElement;
-  const numberColor = inverse ? INVERSE_NUMBER[emphasis] : theme.accentSecondary;
-  const titleColor = inverse ? '#FAF9F6' : theme.heading;
-  const secondaryColor = inverse ? 'rgba(250, 249, 246, 0.7)' : theme.textSecondary;
-  const trackColor = inverse ? 'rgba(250, 249, 246, 0.16)' : theme.backgroundSelected;
+  const numberColor = inverse
+    ? emphasis === 'accent'
+      ? theme.scoreAccentOnInverse
+      : theme.scoreSageOnInverse
+    : theme.accentSecondary;
+  const titleColor = inverse ? theme.onInverse : theme.heading;
+  const secondaryColor = inverse ? theme.onInverseSecondary : theme.textSecondary;
+  const trackColor = inverse ? theme.inverseTrack : theme.backgroundSelected;
 
   return (
     <View style={[styles.card, { backgroundColor: cardBackground }]}>

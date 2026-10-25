@@ -55,7 +55,7 @@ export default function AppearanceSettingsScreen() {
               style={styles.row}
               right={
                 preference === option.value ? (
-                  <Text style={[styles.mark, { color: theme.accent }]}>Selected</Text>
+                  <Text style={[styles.mark, { color: theme.accentStrong }]}>Selected</Text>
                 ) : null
               }
             />

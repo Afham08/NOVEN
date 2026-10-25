@@ -10,18 +10,13 @@ export type StatusChipProps = {
   tone?: StatusChipTone;
 };
 
-const DOT_COLOR: Record<StatusChipTone, string> = {
-  ready: '#527568',
-  accent: '#F15A24',
-  sage: '#7FA497',
-};
-
 export function StatusChip({ label, tone = 'ready' }: StatusChipProps) {
   const theme = useTheme();
+  const dotColor = tone === 'accent' ? theme.accentStrong : theme.accentSecondary;
 
   return (
     <View style={[styles.chip, { backgroundColor: theme.sageSoft }]}>
-      <View style={[styles.dot, { backgroundColor: DOT_COLOR[tone] }]} />
+      <View style={[styles.dot, { backgroundColor: dotColor }]} />
       <Text style={[styles.label, { color: theme.text }]}>{label}</Text>
     </View>
   );

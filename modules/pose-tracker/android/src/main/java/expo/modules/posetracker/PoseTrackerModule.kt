@@ -8,7 +8,7 @@ class PoseTrackerModule : Module() {
     Name("PoseTracker")
 
     View(PoseTrackerView::class) {
-      Events("onFrame", "onPoseFrame")
+      Events("onFrame", "onPoseFrame", "onError")
 
       // Called by React Native only when the view instance is genuinely no
       // longer used (real unmount), NOT on transient window detach/re-attach

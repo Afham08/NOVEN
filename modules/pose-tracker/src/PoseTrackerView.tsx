@@ -10,9 +10,9 @@ try {
   console.error('[PoseTrackerView] requireNativeView("PoseTracker") failed', error);
 }
 
-export default function PoseTrackerView({ onFrame, onPoseFrame, ...rest }: PoseTrackerViewProps) {
+export default function PoseTrackerView({ onFrame, onPoseFrame, onError, ...rest }: PoseTrackerViewProps) {
   if (!NativeView) {
     return null;
   }
-  return <NativeView {...rest} onFrame={onFrame} onPoseFrame={onPoseFrame} />;
+  return <NativeView {...rest} onFrame={onFrame} onPoseFrame={onPoseFrame} onError={onError} />;
 }

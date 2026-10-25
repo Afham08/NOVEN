@@ -90,9 +90,24 @@ export type PoseFrameEventPayload = {
   landmarks: LandmarkEventPayload[];
 };
 
+export type PoseTrackerErrorCategory =
+  | 'camera-permission'
+  | 'camera-startup'
+  | 'camera-runtime'
+  | 'pose-initialization'
+  | 'pose-runtime';
+
+/** Safe, user-readable failure information from the native camera/pose path. */
+export type PoseTrackerErrorPayload = {
+  category: PoseTrackerErrorCategory;
+  message: string;
+};
+
 export type PoseTrackerViewProps = {
   onFrame: (event: { nativeEvent: CameraFrameEventPayload }) => void;
   /** Emitted at up to ~10/s while the camera and pose model are active. */
   onPoseFrame?: (event: { nativeEvent: PoseFrameEventPayload }) => void;
+  /** Emitted once when camera startup or pose tracking becomes unusable. */
+  onError?: (event: { nativeEvent: PoseTrackerErrorPayload }) => void;
   style?: StyleProp<ViewStyle>;
 };

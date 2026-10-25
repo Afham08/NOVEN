@@ -3,6 +3,7 @@ import { check, suite } from './harness';
 
 import { SEATED_KNEE_EXTENSION } from '../src/exercise/configs';
 import { SessionEngine } from '../src/exercise/session-engine';
+import { PoseTrackerFailureGate, stopSessionOnPoseTrackerFailure } from '../src/exercise/pose-tracker-recovery';
 import type { Side } from '../src/exercise/types';
 
 /**
@@ -276,6 +277,80 @@ export function run(): void {
     check('the ready frames still bank their time', engine.elapsedSeconds >= 0, engine.elapsedSeconds);
   });
 
+  suite('exercise tracking failure: fatal initialization errors freeze active time', () => {
+    const engine = new SessionEngine(SEATED_KNEE_EXTENSION);
+    let t = reachReady(engine, 0);
+    t = feedReady(engine, t, 21);
+    const beforeFailure = engine.elapsedSeconds;
+    const gate = new PoseTrackerFailureGate();
+
+    const failure = stopSessionOnPoseTrackerFailure(
+      gate,
+      { category: 'pose-initialization', message: 'internal delegate details' },
+      engine,
+    );
+    check('the initialization failure enters an explicit failure state', failure?.category === 'pose-initialization', failure);
+    check('the user message does not expose native exception details', !failure?.message.includes('internal delegate details'), failure);
+
+    const frozen = engine.elapsedSeconds;
+    feedReady(engine, t, 20);
+    check('active time is frozen at the failure boundary', frozen === beforeFailure && engine.elapsedSeconds === frozen, {
+      beforeFailure,
+      frozen,
+      afterMoreFrames: engine.elapsedSeconds,
+    });
+    check(
+      'a duplicate native error cannot replace the first failure or stop twice',
+      stopSessionOnPoseTrackerFailure(
+        gate,
+        { category: 'pose-runtime', message: 'later error' },
+        engine,
+      ) === null && gate.failure?.category === 'pose-initialization',
+      gate.failure,
+    );
+  });
+
+  suite('exercise tracking failure: runtime errors stop tracking, but pose loss does not', () => {
+    const engine = new SessionEngine(SEATED_KNEE_EXTENSION);
+    const gate = new PoseTrackerFailureGate();
+    const lost = engine.handlePoseFrame(frame(pose(REST, REST), 0, 'lost'));
+    check('temporary pose loss is ordinary frame state, not a fatal tracker error', lost.feedback.text.length > 0 && gate.failure === null);
+
+    const failure = stopSessionOnPoseTrackerFailure(
+      gate,
+      { category: 'pose-runtime', message: 'native details are hidden' },
+      engine,
+    );
+    check('a runtime tracker event is surfaced with safe user-facing copy', failure?.category === 'pose-runtime' && failure.message.includes('stopped unexpectedly'), failure);
+  });
+
+  suite('exercise tracking failure: successful tracking remains operational without a fatal event', () => {
+    const engine = new SessionEngine(SEATED_KNEE_EXTENSION);
+    const gate = new PoseTrackerFailureGate();
+    const t = reachReady(engine, 0);
+    doLeftRep(engine, t);
+
+    check('a healthy native stream produces no failure state', gate.failure === null);
+    check('readiness and repetition behavior still operate normally', engine.readinessPhase === 'ready' && engine.reps === 1, {
+      readiness: engine.readinessPhase,
+      reps: engine.reps,
+    });
+  });
+
+  suite('exercise tracking failure: stale errors after screen teardown are ignored', () => {
+    const staleGate = new PoseTrackerFailureGate();
+    const nextSessionGate = new PoseTrackerFailureGate();
+    staleGate.deactivate();
+
+    const staleFailure = stopSessionOnPoseTrackerFailure(
+      staleGate,
+      { category: 'camera-runtime', message: 'old camera error' },
+      new SessionEngine(SEATED_KNEE_EXTENSION),
+    );
+    check('a disposed session ignores delayed native errors', staleFailure === null && staleGate.failure === null);
+    check('a new session has independent tracking state', nextSessionGate.failure === null);
+  });
+
   suite('exercise clock: the session screen owns no timer of its own', () => {
     const screen = stripComments(read('exercise', 'session.tsx'));
 
@@ -295,6 +370,25 @@ export function run(): void {
       'start arms the session once and lets readiness own the clock',
       screen.includes('engine?.reset()') && !screen.includes('timerRunning'),
     );
+  });
+
+  suite('exercise tracking failure: the session exposes an accessible safe exit', () => {
+    const screen = stripComments(read('exercise', 'session.tsx'));
+
+    check('the native error event is connected to the failure handler', /onError=\{handleTrackerError\}/.test(screen));
+    check('the failure handler enters a terminal tracking-error phase', /goToPhase\('tracking-error'\)/.test(screen));
+    check(
+      'the failure message is announced accessibly and offers a return route',
+      /accessibilityRole="alert"[\s\S]*?accessibilityLiveRegion="assertive"/.test(screen) &&
+        /title="Return to exercises"[\s\S]*?onPress=\{exitFailedSession\}/.test(screen),
+    );
+    check('permission denial retains a distinct placeholder and exit action',
+      screen.includes('<CameraPlaceholder />') && /hasCameraPermission === false[\s\S]*?title="Back to exercises"/.test(screen));
+    check('the safe exit returns to the exercise library before reopening a session',
+      /const exitFailedSession = \(\) => \{[\s\S]*?router\.replace\('\/exercise'\)/.test(screen));
+    check('the failed phase has no ordinary End or Pause controls', /phase === 'tracking-error' \? null/.test(screen));
+    check('fatal failure unmounts the native view so its camera can be released',
+      /phase === 'completed' \|\| phase === 'tracking-error' \? null/.test(screen));
   });
 
   suite('exercise clock: the camera preview stays unobstructed', () => {

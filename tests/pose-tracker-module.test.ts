@@ -139,4 +139,46 @@ export function run(): void {
     check('TextureView handling is still present', /TextureView/.test(text));
     check('the diagnostics were not stripped', /\[DIAG-/.test(text));
   });
+
+  suite('pose tracker native module: fatal failures cross the Expo view-event bridge once', () => {
+    const sources = kotlinSources(MODULE_ROOT);
+    const processor = sources.find((file) => file.name === 'PoseTrackerProcessor.kt')?.text ?? '';
+    const view = sources.find((file) => file.name === 'PoseTrackerView.kt')?.text ?? '';
+    const module = sources.find((file) => file.name === 'PoseTrackerModule.kt')?.text ?? '';
+    const errorEvent = sources.find((file) => file.name === 'PoseTrackerErrorEvent.kt')?.text ?? '';
+
+    check(
+      'GPU initialization still falls back to CPU before reporting failure',
+      /createPoseLandmarker\(Delegate\.GPU\)\s*\?:\s*createPoseLandmarker\(Delegate\.CPU\)/.test(processor) &&
+        /if\s*\(poseLandmarker\s*==\s*null\)[\s\S]*?reportFatalFailure\([\s\S]*?pose-initialization/.test(processor),
+    );
+    check(
+      'MediaPipe runtime failures use the same controlled error callback',
+      /onDetectError\([\s\S]*?reportFatalFailure\([\s\S]*?pose-runtime/.test(processor) &&
+        /onFatalError\(PoseTrackerErrorEvent\(category, message\)\)/.test(processor),
+    );
+    check(
+      'the native view emits only one failure and stops forwarding pose events afterward',
+      /failureEventEmitted\.compareAndSet\(false, true\)/.test(view) &&
+        /Events\("onFrame", "onPoseFrame", "onError"\)/.test(module) &&
+        /!failureEventEmitted\.get\(\)\)\s*onPoseFrame/.test(view),
+    );
+    check(
+      'camera permission, startup, and runtime errors use distinct categories',
+      /"camera-permission"/.test(view) && /"camera-startup"/.test(view) && /"camera-runtime"/.test(view),
+    );
+    check(
+      'CameraX state errors distinguish startup from post-open runtime failure',
+      /state\.type == CameraState\.Type\.OPEN[\s\S]*?if \(cameraHasOpened\.get\(\)\) "camera-runtime" else "camera-startup"/.test(view),
+    );
+    check(
+      'the Expo error payload is structured and does not expose exception fields',
+      /class PoseTrackerErrorEvent[\s\S]*?@Field val category: String[\s\S]*?@Field val message: String/.test(errorEvent) &&
+        !/stackTrace|cause\s*:\s*Throwable/.test(errorEvent),
+    );
+    check(
+      'the CameraX state observer is removed when its view is destroyed',
+      /state\.removeObserver\(observer\)/.test(view) && /OnViewDestroys[\s\S]*?releaseCameraAndPose\(\)/.test(module),
+    );
+  });
 }

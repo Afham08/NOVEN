@@ -1107,7 +1107,7 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
         against an engine that is not there yet.
       */}
       {showCameraPreview && (
-        <View style={styles.cameraFrame}>
+        <View style={[styles.cameraFrame, { backgroundColor: theme.cameraSurface }]}>
           <PoseTrackerView
             style={styles.camera}
             onFrame={() => {}}
@@ -1116,7 +1116,7 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
           <View style={styles.cameraHudOverlay}>
             {isPoseStep ? (
               <View style={[styles.posturePanel, { backgroundColor: posePanelColor(theme, poseHold) }]}>
-                <Text style={styles.posturePanelLabel}>
+                <Text style={[styles.posturePanelLabel, { color: theme.cameraOnOverlayMuted }]}>
                   {posePanelName(currentPoseRule).toUpperCase()}
                 </Text>
                 {/*
@@ -1127,7 +1127,7 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
                   broken, and showing that as "held" would credit time nobody spent in
                   position.
                 */}
-                <Text style={styles.posturePanelText}>
+                <Text style={[styles.posturePanelText, { color: theme.cameraOnOverlay }]}>
                   Held {formatHeldSeconds(poseHold?.holdSeconds)} of {poseHold?.requiredSeconds ?? 0}{' '}
                   seconds
                 </Text>
@@ -1137,9 +1137,13 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
                   nothing but its number.
                 */}
                 {poseHold?.correction ? (
-                  <Text style={styles.posePanelCorrection}>{poseHold.correction}</Text>
+                  <Text style={[styles.posePanelCorrection, { color: theme.cameraOnOverlay }]}>
+                    {poseHold.correction}
+                  </Text>
                 ) : null}
-                <Text style={styles.posturePanelLabel}>{poseHoldLine(poseHold)}</Text>
+                <Text style={[styles.posturePanelLabel, { color: theme.cameraOnOverlayMuted }]}>
+                  {poseHoldLine(poseHold)}
+                </Text>
               </View>
             ) : isMeditation ? (
               <View
@@ -1155,24 +1159,30 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
                   in the app with no counter, because there is nothing here to
                   count.
                 */}
-                <Text style={styles.posturePanelLabel}>POSTURE</Text>
-                <Text style={styles.posturePanelText}>
+                <Text style={[styles.posturePanelLabel, { color: theme.cameraOnOverlayMuted }]}>POSTURE</Text>
+                <Text style={[styles.posturePanelText, { color: theme.cameraOnOverlay }]}>
                   {postureGuidance?.text ?? 'Camera starting up'}
                 </Text>
               </View>
             ) : cameraHud.reps === 0 ? (
-              <View style={styles.cameraReadyPanel}>
-                <Text style={styles.cameraReadyTitle}>GET READY</Text>
-                <Text style={styles.cameraReadyLine}>
+              <View style={[styles.cameraReadyPanel, { backgroundColor: theme.cameraOverlay }]}>
+                <Text style={[styles.cameraReadyTitle, { color: theme.cameraOnOverlay }]}>GET READY</Text>
+                <Text style={[styles.cameraReadyLine, { color: theme.cameraOnOverlay }]}>
                   {currentStepConfig?.name ?? 'Pose'}
                 </Text>
-                <Text style={styles.cameraReadyHint}>{cameraHud.feedback.text}</Text>
+                <Text style={[styles.cameraReadyHint, { color: theme.cameraOnOverlaySecondary }]}>
+                  {cameraHud.feedback.text}
+                </Text>
               </View>
             ) : (
-              <View style={styles.cameraRunPanel}>
-                <Text style={styles.cameraRepsLabel}>REPS</Text>
-                <Text style={styles.cameraRepsValue}>{cameraHud.reps}</Text>
-                <Text style={styles.cameraInstruction}>{cameraHud.feedback.text}</Text>
+              <View style={[styles.cameraRunPanel, { backgroundColor: theme.cameraOverlayStrong }]}>
+                <Text style={[styles.cameraRepsLabel, { color: theme.cameraOnOverlay }]}>REPS</Text>
+                <Text style={[styles.cameraRepsValue, { color: theme.cameraOnOverlay }]}>
+                  {cameraHud.reps}
+                </Text>
+                <Text style={[styles.cameraInstruction, { color: theme.cameraOnOverlay }]}>
+                  {cameraHud.feedback.text}
+                </Text>
               </View>
             )}
           </View>
@@ -1193,18 +1203,18 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
       */}
       {notStarted ? null : (
         <Card variant="inverse" gap={Spacing.two}>
-          <Text style={[styles.stepPosition, { color: 'rgba(250, 249, 246, 0.72)' }]}>
+          <Text style={[styles.stepPosition, { color: theme.onInverseSecondary }]}>
             {describeStepPosition(
               snapshot.stepsCompleted,
               activity.steps.length,
               activity.progressNoun,
             )}
           </Text>
-          <Text style={[styles.stepTitle, { color: theme.accent }]}>
+          <Text style={[styles.stepTitle, { color: theme.accentOnInverse }]}>
             {snapshot.currentStep?.title ?? 'Finished'}
           </Text>
           {snapshot.currentStep ? (
-            <Text style={[styles.stepGuidance, { color: '#FAF9F6' }]}>
+            <Text style={[styles.stepGuidance, { color: theme.onInverse }]}>
               {snapshot.currentStep.guidance}
             </Text>
           ) : null}
@@ -1281,7 +1291,7 @@ export function GuidedActivityScreen({ activity }: GuidedActivityScreenProps) {
                 <Text
                   style={[
                     styles.stepMarkerText,
-                    { color: done || current ? theme.accent : theme.textSecondary },
+                    { color: done || current ? theme.accentStrong : theme.textSecondary },
                   ]}>
                   {index + 1}
                 </Text>
@@ -1690,7 +1700,6 @@ const styles = StyleSheet.create({
     aspectRatio: 1,
     borderRadius: Radius.card,
     overflow: 'hidden',
-    backgroundColor: '#202522',
   },
   camera: {
     position: 'absolute',
@@ -1714,14 +1723,12 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.five,
     paddingHorizontal: Spacing.six,
     borderRadius: Radius.card,
-    backgroundColor: 'rgba(18, 20, 19, 0.74)',
   },
   cameraReadyTitle: {
     ...Type.heading,
     fontSize: 40,
     lineHeight: 48,
     fontWeight: '800',
-    color: '#FAF9F6',
     textAlign: 'center',
     letterSpacing: 1,
   },
@@ -1730,7 +1737,6 @@ const styles = StyleSheet.create({
     fontSize: 24,
     lineHeight: 32,
     fontWeight: '700',
-    color: '#FAF9F6',
     textAlign: 'center',
   },
   cameraReadyHint: {
@@ -1738,7 +1744,6 @@ const styles = StyleSheet.create({
     fontSize: 19,
     lineHeight: 26,
     fontWeight: '500',
-    color: '#E7EFEB',
     textAlign: 'center',
   },
   cameraRunPanel: {
@@ -1746,21 +1751,18 @@ const styles = StyleSheet.create({
     gap: Spacing.one,
     paddingVertical: Spacing.two,
     paddingHorizontal: Spacing.four,
-    backgroundColor: 'rgba(18, 20, 19, 0.80)',
   },
   cameraRepsLabel: {
     ...Type.label,
     fontSize: 20,
     lineHeight: 26,
     fontWeight: '800',
-    color: '#FAF9F6',
     letterSpacing: 5,
   },
   cameraRepsValue: {
     fontSize: 84,
     lineHeight: 90,
     fontWeight: '800',
-    color: '#FAF9F6',
     textAlign: 'center',
     fontVariant: ['tabular-nums'],
   },
@@ -1769,7 +1771,6 @@ const styles = StyleSheet.create({
     fontSize: 28,
     lineHeight: 34,
     fontWeight: '700',
-    color: '#FAF9F6',
     textAlign: 'center',
   },
   posturePanel: {
@@ -1782,21 +1783,18 @@ const styles = StyleSheet.create({
   },
   posturePanelLabel: {
     ...Type.label,
-    color: 'rgba(250, 249, 246, 0.72)',
     textAlign: 'center',
   },
   posturePanelText: {
     ...Type.bodyEmphasis,
     fontSize: 22,
     lineHeight: 30,
-    color: '#FAF9F6',
     textAlign: 'center',
   },
   posePanelCorrection: {
     ...Type.bodyEmphasis,
     fontSize: 19,
     lineHeight: 26,
-    color: '#FAF9F6',
     textAlign: 'center',
   },
 });

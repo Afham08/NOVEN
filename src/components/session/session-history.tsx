@@ -1,14 +1,20 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 
 import { describeSessionOutcome } from '@/activities/activity-format';
 import { Card } from '@/components/ui/card';
+import { SessionHistoryLoadNotice } from '@/components/session/session-history-load-notice';
 import { Spacing, Type } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { formatDurationLabel, formatPaceLabel } from '@/exercise/metrics';
 import { sessionsForExercise, steadinessLabel, timeOfDayLabel } from '@/exercise/history-format';
-import { dayLabel, type SessionRecord, type SessionStore } from '@/exercise/session-store';
+import {
+  dayLabel,
+  type SessionHistoryLoadIssue,
+  type SessionRecord,
+  type SessionStore,
+} from '@/exercise/session-store';
 
 export type SessionHistoryProps = {
   store: SessionStore;
@@ -19,6 +25,8 @@ export type SessionHistoryProps = {
   onOpenSession?: (record: SessionRecord) => void;
   /** How many sessions to show before the "Show earlier sessions" control. */
   limit?: number;
+  /** When supplied (including null), the caller owns loading and supplies one shared read. */
+  loadedRecords?: readonly SessionRecord[] | null;
   /**
    * When set, only this exercise's own sessions are listed — the Exercise
    * detail screen's "Your sessions" section. The rows, the expand control and
@@ -70,42 +78,72 @@ export function SessionHistory({
   onOpenSession,
   limit = DEFAULT_LIMIT,
   exerciseId,
+  loadedRecords,
 }: SessionHistoryProps) {
   const theme = useTheme();
-  const [records, setRecords] = useState<SessionRecord[] | null>(null);
+  const externallyManaged = loadedRecords !== undefined;
+  const [localRecords, setLocalRecords] = useState<SessionRecord[] | null>(null);
+  const [loadIssue, setLoadIssue] = useState<SessionHistoryLoadIssue | null>(null);
+  const retryLoader = useRef<(() => void) | null>(null);
   /** How many rows are currently revealed; starts at the screen's chosen limit. */
   const [visibleCount, setVisibleCount] = useState(limit);
+  const retry = useCallback(() => retryLoader.current?.(), []);
 
   /**
    * Read the history whenever the screen regains focus, not only on mount:
    * finishing a session and coming back has to show the new session here, or the
-   * list would sit next to the progress chart and contradict it. A read failure
-   * resolves to an empty list inside the store, so this needs no error branch:
-   * the empty state is the correct thing to show when the history cannot be read.
+   * list would sit next to the progress chart and contradict it. A detailed read
+   * keeps storage errors distinct from a genuinely empty history, and a retry is
+   * available without navigating away.
    */
   useFocusEffect(
     useCallback(() => {
-      // Cancellation is not needed for correctness — a late resolve only replaces
-      // the list with a still-valid read of the same store — but the flag keeps
-      // an unmounted screen from setting state.
+      if (externallyManaged) return;
       let active = true;
-      void store.getSessions().then((next) => {
-        if (active) setRecords(next);
-      });
+      let request = 0;
+      const load = () => {
+        const currentRequest = ++request;
+        void Promise.resolve()
+          .then(() => store.getSessionsResult())
+          .then((result) => {
+            if (!active || currentRequest !== request) return;
+            if (result.status === 'error') {
+              setLocalRecords(null);
+              setLoadIssue(result.issue);
+              return;
+            }
+            setLocalRecords(result.records);
+            setLoadIssue(result.status === 'partial' ? result.issue : null);
+          })
+          .catch(() => {
+            if (!active || currentRequest !== request) return;
+            setLocalRecords(null);
+            setLoadIssue({ kind: 'storage', partial: false });
+          });
+      };
+      retryLoader.current = load;
+      load();
       return () => {
         active = false;
+        if (retryLoader.current === load) retryLoader.current = null;
       };
-    }, [store]),
+    }, [store, externallyManaged]),
   );
 
+  const records = externallyManaged ? loadedRecords ?? null : localRecords;
+  const issue = externallyManaged ? null : loadIssue;
+
   // Not yet read: render nothing rather than a misleading "no sessions yet".
-  if (records === null) return null;
+  if (records === null) {
+    return issue ? <SessionHistoryLoadNotice issue={issue} onRetry={retry} /> : null;
+  }
 
   // What this particular list shows: the whole history, or one exercise's own.
   const listed = exerciseId === undefined ? records : sessionsForExercise(records, exerciseId);
   const visible = listed.slice(0, Math.max(0, visibleCount));
 
   if (visible.length === 0) {
+    if (issue) return <SessionHistoryLoadNotice issue={issue} onRetry={retry} />;
     return (
       <Card variant="surface" gap={Spacing.two}>
         <Text style={[styles.emptyTitle, { color: theme.heading }]}>
@@ -124,6 +162,7 @@ export function SessionHistory({
 
   return (
     <View style={styles.list}>
+      {issue ? <SessionHistoryLoadNotice issue={issue} onRetry={retry} /> : null}
       {visible.map((record) => (
         <HistoryRow
           key={record.id}
@@ -189,7 +228,7 @@ function HistoryRow({
 
         <View style={styles.statRow}>
           {/* The count is the headline number, matching the Result screen. */}
-          <Text style={[styles.count, { color: theme.accent }]}>
+          <Text style={[styles.count, { color: theme.accentStrong }]}>
             {describeSessionOutcome(record)}
           </Text>
           <Text style={[styles.duration, { color: theme.textSecondary }]}>

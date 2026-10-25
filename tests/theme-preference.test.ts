@@ -3,10 +3,12 @@ import { check, suite } from './harness';
 import {
   DEFAULT_THEME_PREFERENCE,
   THEME_PREFERENCE_KEY,
+  ThemePreferenceController,
   createThemePreferenceStore,
   isThemePreference,
   parseThemePreference,
   type ThemePreference,
+  type ThemePreferenceStore,
 } from '../src/settings/theme-preference';
 import type { KeyValueStore } from '../src/exercise/session-store';
 
@@ -27,6 +29,14 @@ function memoryStore(seed: Record<string, string> = {}): KeyValueStore & { dump(
       return { ...data };
     },
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }
 
 export function run(): void {
@@ -68,6 +78,78 @@ export function run(): void {
 
     await store.save('light');
     check('a second choice replaces the first', (await afterRestart.load()) === 'light');
+  });
+
+  suite('theme preference: successful changes update state and storage', async () => {
+    const backing = memoryStore({ [THEME_PREFERENCE_KEY]: 'dark' });
+    const controller = new ThemePreferenceController(createThemePreferenceStore(backing));
+    await controller.load();
+
+    await controller.setPreference('light');
+    check('a successful Light choice updates the visible preference', controller.getSnapshot().preference === 'light');
+    check('a successful Light choice is stored', backing.dump()[THEME_PREFERENCE_KEY] === 'light');
+
+    await controller.setPreference('system');
+    check('System remains a selectable preference', controller.getSnapshot().preference === 'system');
+    check('System is persisted as the phone-following choice', backing.dump()[THEME_PREFERENCE_KEY] === 'system');
+  });
+
+  suite('theme preference: a failed save restores the last persisted choice', async () => {
+    const backing = memoryStore({ [THEME_PREFERENCE_KEY]: 'dark' });
+    const base = createThemePreferenceStore(backing);
+    const failingStore: ThemePreferenceStore = {
+      load: () => base.load(),
+      async save() {
+        throw new Error('storage unavailable');
+      },
+      clear: () => base.clear(),
+    };
+    const controller = new ThemePreferenceController(failingStore);
+    await controller.load();
+
+    const pendingSave = controller.setPreference('light');
+    check('the new choice is applied optimistically', controller.getSnapshot().preference === 'light');
+    await pendingSave;
+
+    check('a rejected write does not crash the controller', controller.getSnapshot().ready);
+    check('a failed write restores the previous valid preference', controller.getSnapshot().preference === 'dark');
+    check('the persisted value remains the previous preference', backing.dump()[THEME_PREFERENCE_KEY] === 'dark');
+  });
+
+  suite('theme preference: a selection made during initial loading wins over stale storage', async () => {
+    for (const selected of ['light', 'dark', 'system'] as const) {
+      const initialStored: ThemePreference = selected === 'dark' ? 'light' : 'dark';
+      const loading = deferred<ThemePreference>();
+      const writeStarted = deferred<ThemePreference>();
+      const writeGate = deferred<void>();
+      let persisted: ThemePreference = initialStored;
+      const delayedStore: ThemePreferenceStore = {
+        load: () => loading.promise,
+        async save(next) {
+          writeStarted.resolve(next);
+          await writeGate.promise;
+          persisted = next;
+        },
+        async clear() {
+          persisted = 'system';
+        },
+      };
+      const controller = new ThemePreferenceController(delayedStore);
+      const initialLoad = controller.load();
+      const pendingSave = controller.setPreference(selected);
+      check(`${selected} is visible immediately while loading`, controller.getSnapshot().preference === selected);
+
+      loading.resolve(initialStored);
+      await initialLoad;
+      const writeValue = await writeStarted.promise;
+      check(`${selected} is not overwritten by the stale initial read`, controller.getSnapshot().preference === selected);
+      check(`${selected} is the value queued for persistence`, writeValue === selected);
+
+      writeGate.resolve(undefined);
+      await pendingSave;
+      check(`${selected} remains visible after persistence`, controller.getSnapshot().preference === selected);
+      check(`${selected} is the final persisted value`, persisted === selected);
+    }
   });
 
   suite('theme preference: a corrupt or hand-edited value is not trusted', async () => {

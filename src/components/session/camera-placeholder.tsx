@@ -2,6 +2,7 @@ import { SymbolView } from 'expo-symbols';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { Radius, Spacing, Type } from '@/constants/theme';
+import { useTheme } from '@/hooks/use-theme';
 
 /**
  * Shown only when the camera is unavailable — permission not granted yet or
@@ -17,16 +18,22 @@ import { Radius, Spacing, Type } from '@/constants/theme';
  * the session is blocked.
  */
 export function CameraPlaceholder({ optional = false }: { optional?: boolean }) {
+  const theme = useTheme();
+  const frameBackground = optional ? theme.backgroundElement : theme.warningSoft;
+  const frameBorder = optional ? theme.border : theme.warning;
+  const titleColor = optional ? theme.heading : theme.warning;
+  const subtitleColor = optional ? theme.textSecondary : theme.text;
+
   return (
-    <View style={styles.frame}>
+    <View style={[styles.frame, { backgroundColor: frameBackground, borderColor: frameBorder }]}>
       <View style={styles.inner}>
         <SymbolView
           name={{ ios: 'camera.viewfinder', android: 'camera', web: 'camera' }}
           size={40}
-          tintColor="rgba(250, 249, 246, 0.85)"
+          tintColor={optional ? theme.accentSecondary : theme.warning}
         />
-        <Text style={styles.title}>Camera unavailable</Text>
-        <Text style={styles.subtitle}>
+        <Text style={[styles.title, { color: titleColor }]}>Camera unavailable</Text>
+        <Text style={[styles.subtitle, { color: subtitleColor }]}>
           {optional
             ? 'You can carry on without the camera. Allow camera access in Settings if you would like a posture reminder.'
             : 'Camera access is needed to track your movement. Allow it in Settings, then reopen this session.'}
@@ -39,11 +46,9 @@ export function CameraPlaceholder({ optional = false }: { optional?: boolean }) 
 const styles = StyleSheet.create({
   frame: {
     height: 260,
-    backgroundColor: '#202522',
     borderRadius: Radius.card,
     borderWidth: 1.5,
     borderStyle: 'dashed',
-    borderColor: 'rgba(250, 249, 246, 0.25)',
     alignItems: 'center',
     justifyContent: 'center',
     padding: Spacing.four,
@@ -54,7 +59,6 @@ const styles = StyleSheet.create({
   },
   title: {
     ...Type.label,
-    color: '#FAF9F6',
     fontSize: 18,
     lineHeight: 26,
     textTransform: 'uppercase',
@@ -63,7 +67,6 @@ const styles = StyleSheet.create({
   },
   subtitle: {
     ...Type.label,
-    color: 'rgba(250, 249, 246, 0.7)',
     fontSize: 16,
     lineHeight: 24,
     textAlign: 'center',

@@ -8,6 +8,8 @@ export type InfoRowProps = {
   value: string;
   /** Renders the value in the brand accent color. */
   emphasize?: boolean;
+  /** Optional semantic foreground for status values. */
+  valueColor?: string;
   /**
    * Stack the value underneath the label instead of setting them side by side.
    *
@@ -24,11 +26,12 @@ export function InfoRow({
   label,
   value,
   emphasize = false,
+  valueColor: explicitValueColor,
   stacked = false,
   style,
 }: InfoRowProps) {
   const theme = useTheme();
-  const valueColor = emphasize ? theme.accent : theme.heading;
+  const valueColor = explicitValueColor ?? (emphasize ? theme.accentStrong : theme.heading);
 
   if (stacked) {
     return (

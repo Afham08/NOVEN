@@ -1,5 +1,5 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { Screen } from '@/components/layout/screen';
@@ -18,19 +18,27 @@ import {
   parseRepCountParam,
 } from '@/exercise/result-params';
 import { leaveExerciseResult } from '@/exercise/result-exit';
+import { sessionSaveStatusTracker, type SessionHistorySaveStatus } from '@/exercise/session-save-status';
 
 export default function ResultScreen() {
-  const { id, reps, duration, pace, range, consistency } = useLocalSearchParams<{
+  const { id, reps, duration, pace, range, consistency, recordId } = useLocalSearchParams<{
     id?: string;
     reps?: string;
     duration?: string;
     pace?: string;
     range?: string;
     consistency?: string;
+    recordId?: string;
   }>();
   const router = useRouter();
   const theme = useTheme();
   const exercise = getExerciseById(id);
+  const [historySaveStatus, setHistorySaveStatus] = useState<SessionHistorySaveStatus | null>(null);
+
+  useEffect(() => {
+    if (typeof recordId !== 'string' || recordId.length === 0) return;
+    return sessionSaveStatusTracker.subscribe(recordId, setHistorySaveStatus);
+  }, [recordId]);
 
   // `reps` crosses the navigation boundary as an untrusted string, so it is
   // re-validated here rather than coerced blindly. 0 is a real result; "abc",
@@ -65,6 +73,12 @@ export default function ResultScreen() {
   }
 
   const exerciseWord = repCount === 1 ? 'exercise' : 'exercises';
+  const historySaveColor =
+    historySaveStatus === 'saved'
+      ? theme.success
+      : historySaveStatus === 'failed'
+        ? theme.danger
+        : theme.textSecondary;
 
   return (
     <Screen>
@@ -87,14 +101,14 @@ export default function ResultScreen() {
           accessibilityLabel={`${repCount} ${exerciseWord} completed`}>
           <Text
             maxFontSizeMultiplier={1.6}
-            style={[styles.heroNumber, { color: theme.accent }]}
+            style={[styles.heroNumber, { color: theme.accentOnInverse }]}
             // 84px already fills most of a narrow phone; the cap stops a large
             // accessibility text size from pushing a multi-digit count off the
             // card. Labels and values below keep scaling freely.
             >
             {repCount}
           </Text>
-          <Text style={[styles.heroLabel, { color: 'rgba(250, 249, 246, 0.78)' }]}>
+          <Text style={[styles.heroLabel, { color: theme.onInverseSecondary }]}>
             {exerciseWord} completed
           </Text>
         </View>
@@ -108,6 +122,16 @@ export default function ResultScreen() {
       <Text style={[styles.explainer, { color: theme.textSecondary }]}>
         These results show how your exercise session went.
       </Text>
+
+      {historySaveStatus && (
+        <Text accessibilityLiveRegion="polite" style={[styles.saveStatus, { color: historySaveColor }]}>
+          {historySaveStatus === 'saving'
+            ? 'Saving this session to your history…'
+            : historySaveStatus === 'saved'
+              ? 'Saved to your session history.'
+              : 'Could not save this session to your history. Your results remain available, but this session will not appear in History.'}
+        </Text>
+      )}
 
       {/*
         Plainest and most factual first, most easily misread last, so an older
@@ -161,5 +185,10 @@ const styles = StyleSheet.create({
     ...Type.body,
     fontSize: 17,
     lineHeight: 26,
+  },
+  saveStatus: {
+    ...Type.body,
+    fontSize: 16,
+    lineHeight: 24,
   },
 });

@@ -97,6 +97,17 @@ export type SessionRecord = SessionMetrics & {
   stepsCompleted?: number;
 };
 
+export type SessionHistoryLoadIssue = {
+  kind: 'storage' | 'malformed';
+  /** True when some valid records survived alongside malformed entries. */
+  partial: boolean;
+};
+
+export type SessionHistoryLoadResult =
+  | { status: 'loaded'; records: SessionRecord[] }
+  | { status: 'partial'; records: SessionRecord[]; issue: SessionHistoryLoadIssue }
+  | { status: 'error'; issue: SessionHistoryLoadIssue };
+
 /** The subset of AsyncStorage this module needs. AsyncStorage satisfies it. */
 export type KeyValueStore = {
   getItem(key: string): Promise<string | null>;
@@ -285,28 +296,46 @@ export function sortNewestFirst(records: SessionRecord[]): SessionRecord[] {
   return [...records].sort((a, b) => Date.parse(b.completedAt) - Date.parse(a.completedAt));
 }
 
-/**
- * Parses the whole stored blob. A single unreadable byte anywhere yields the
- * sessions that did survive, never an exception — a corrupt history is a
- * missing feature, not a crash on the home screen.
- */
-export function parseSessionHistory(raw: string | null | undefined): SessionRecord[] {
-  if (typeof raw !== 'string' || raw.length === 0) return [];
+/** Parses storage while preserving whether the blob was readable in the first place. */
+export function parseSessionHistoryResult(raw: string | null | undefined): SessionHistoryLoadResult {
+  if (raw === null || raw === undefined) return { status: 'loaded', records: [] };
+  if (typeof raw !== 'string' || raw.length === 0) {
+    return { status: 'error', issue: { kind: 'malformed', partial: false } };
+  }
 
   let decoded: unknown;
   try {
     decoded = JSON.parse(raw);
   } catch {
-    return [];
+    return { status: 'error', issue: { kind: 'malformed', partial: false } };
   }
-  if (!Array.isArray(decoded)) return [];
+  if (!Array.isArray(decoded)) {
+    return { status: 'error', issue: { kind: 'malformed', partial: false } };
+  }
 
   const records: SessionRecord[] = [];
+  let droppedEntries = 0;
   for (const entry of decoded) {
     const record = parseSessionRecord(entry);
     if (record !== null) records.push(record);
+    else droppedEntries += 1;
   }
-  return sortNewestFirst(records);
+
+  const sorted = sortNewestFirst(records);
+  if (droppedEntries === 0) return { status: 'loaded', records: sorted };
+  const issue: SessionHistoryLoadIssue = { kind: 'malformed', partial: sorted.length > 0 };
+  return sorted.length > 0
+    ? { status: 'partial', records: sorted, issue }
+    : { status: 'error', issue };
+}
+
+/**
+ * Backwards-compatible parser: unreadable input yields no records rather than
+ * throwing. History screens use parseSessionHistoryResult to show that failure.
+ */
+export function parseSessionHistory(raw: string | null | undefined): SessionRecord[] {
+  const result = parseSessionHistoryResult(raw);
+  return result.status === 'error' ? [] : result.records;
 }
 
 /**
@@ -348,6 +377,8 @@ export type SessionStore = {
   saveSession(record: SessionRecord): Promise<SessionRecord>;
   /** Every stored session, newest first. */
   getSessions(): Promise<SessionRecord[]>;
+  /** Detailed read outcome for screens that must distinguish empty from failure. */
+  getSessionsResult(): Promise<SessionHistoryLoadResult>;
   /** One session by id, or null. */
   getSessionById(id: string): Promise<SessionRecord | null>;
   /** Removes one session. Resolves false when the id was not stored. */
@@ -372,28 +403,30 @@ export type SessionStore = {
  * the cached list, so a history believed to be empty would be written back over
  * the key as a single new session and every stored session would be destroyed.
  *
- * So a failed read is not cached. `readFailed` records that the last attempt got
- * no answer, which gives `read()` two jobs to stay honest about:
+ * So a failed or partially corrupt read is not mistaken for a valid empty list.
+ * `historyUnreadable` records that the existing blob could not be fully trusted,
+ * which gives `read()` two jobs to stay honest about:
  *
- *   - it leaves `cache` at `null`, so the next read retries the storage instead of
- *     reporting an empty history for the rest of the process, and
+ *   - it leaves an unusable blob uncached, so the next read retries storage instead
+ *     of reporting an empty history for the rest of the process, and
  *   - it makes `write()` refuse, so an unread history is never overwritten.
  *
- * A caller still gets `[]` back from a read that failed, because a list it could
- * not load must still render and the empty state is the honest answer for it.
- * That is unchanged. What changes is that the store no longer mistakes "could not
- * read" for "read it, and there was nothing there".
+ * The legacy `getSessions()` still returns `[]` when no usable records can be
+ * returned. History and Progress use `getSessionsResult()` instead, so they can
+ * show the read issue rather than presenting that fallback as a genuine empty
+ * history.
  */
 export function createSessionStore(store: KeyValueStore): SessionStore {
   let cache: SessionRecord[] | null = null;
-  let readFailed = false;
+  let cacheIssue: SessionHistoryLoadIssue | null = null;
+  let historyUnreadable = false;
 
   /*
    * ==========================================================================
    * WHY THIS STORE NEEDS TWO PIECES OF CONCURRENCY STATE
    * ==========================================================================
    *
-   * `cache` and `readFailed` are shared by every caller, and reaching storage
+   * `cache` and `historyUnreadable` are shared by every caller, and reaching storage
    * means awaiting. Two things can therefore go wrong that no amount of care
    * inside a single operation can prevent, because the damage happens BETWEEN
    * operations.
@@ -449,29 +482,24 @@ export function createSessionStore(store: KeyValueStore): SessionStore {
     return result;
   }
 
-  async function read(): Promise<SessionRecord[]> {
-    if (cache !== null) return cache;
+  function fromCache(): SessionHistoryLoadResult {
+    if (cache === null) return { status: 'error', issue: { kind: 'storage', partial: false } };
+    const records = cache;
+    return cacheIssue
+      ? { status: 'partial', records, issue: cacheIssue }
+      : { status: 'loaded', records };
+  }
+
+  async function readResult(): Promise<SessionHistoryLoadResult> {
+    if (cache !== null) return fromCache();
     const issuedAt = storedEpoch;
     let raw: string | null = null;
     try {
       raw = await store.getItem(SESSION_HISTORY_KEY);
     } catch {
-      // A storage read that throws is treated as "nothing stored yet" rather
-      // than propagated: the history list degrades to empty instead of the app
-      // failing to render.
-      //
-      // `cache` is deliberately left alone rather than set to `[]`. It stays
-      // `null` so the next call retries the storage instead of serving this empty
-      // list for the rest of the process, and `readFailed` records that nothing
-      // has actually been read yet so `write()` knows it must not overwrite it.
-      //
-      // Unless a mutation has landed since, in which case this answer is about a
-      // history that no longer exists and must be discarded rather than recorded
-      // as a failure: a clear that already removed the key is exactly the case
-      // where the next save is entitled to write.
-      if (issuedAt !== storedEpoch) return cache ?? [];
-      readFailed = true;
-      return [];
+      if (issuedAt !== storedEpoch) return fromCache();
+      historyUnreadable = true;
+      return { status: 'error', issue: { kind: 'storage', partial: false } };
     }
     /*
      * The epoch is re-checked before the result is published, which is the whole
@@ -482,28 +510,39 @@ export function createSessionStore(store: KeyValueStore): SessionStore {
      *
      * Falling back to the cache is safe precisely because the mutation that moved
      * the epoch is what populated it: a clear sets it to `[]`, and a write sets it
-     * to what it just stored. If neither happened, the cache is still `null` and
-     * the honest answer is the empty list.
+     * to what it just stored. If a mutation invalidated this snapshot before it
+     * could publish, only an already-populated cache is a reliable replacement;
+     * otherwise the detailed read remains unavailable until the mutation settles.
      */
-    if (issuedAt !== storedEpoch) return cache ?? [];
-    cache = parseSessionHistory(raw);
-    readFailed = false;
-    return cache;
+    if (issuedAt !== storedEpoch) return fromCache();
+
+    const parsed = parseSessionHistoryResult(raw);
+    if (parsed.status === 'error') {
+      historyUnreadable = true;
+      return parsed;
+    }
+
+    cache = parsed.records;
+    cacheIssue = parsed.status === 'partial' ? parsed.issue : null;
+    historyUnreadable = cacheIssue !== null;
+    return fromCache();
+  }
+
+  async function read(): Promise<SessionRecord[]> {
+    const result = await readResult();
+    return result.status === 'error' ? [] : result.records;
   }
 
   async function write(records: SessionRecord[]): Promise<void> {
-    // `records` is always "what was already stored, plus the new one", so if its
-    // starting point came from a read that failed it is not the stored history at
-    // all - it is an empty list, and writing it would delete every session
-    // currently on the device. Refusing is the only way to keep them. The caller
-    // already has to handle a save that does not land, and a session that went
-    // unrecorded costs far less than a history that cannot be recovered.
+    // `records` is only safe to write after the original history was fully read.
+    // If storage failed or any part of the blob was malformed, replacing it with
+    // the surviving records could silently erase data we could not understand.
     //
     // This is unreachable from `deleteSession`: with no successful read its list
     // is empty, so nothing matches and it reports false before writing. Deletion
     // therefore keeps its existing behaviour either way.
-    if (readFailed) {
-      throw new Error('session history could not be read; refusing to overwrite it');
+    if (historyUnreadable) {
+      throw new Error('session history is unreadable; refusing to overwrite it');
     }
     const sorted = sortNewestFirst(records).slice(0, MAX_SAVED_SESSIONS);
     // Bumped before the write reaches storage, not after, so a read that settles
@@ -536,6 +575,11 @@ export function createSessionStore(store: KeyValueStore): SessionStore {
       return [...(await read())];
     },
 
+    async getSessionsResult() {
+      const result = await readResult();
+      return result.status === 'error' ? result : { ...result, records: [...result.records] };
+    },
+
     async getSessionById(id) {
       return (await read()).find((entry) => entry.id === id) ?? null;
     },
@@ -551,49 +595,18 @@ export function createSessionStore(store: KeyValueStore): SessionStore {
     },
 
     /*
-     * WHY `readFailed` IS RESET HERE
-     * -------------------------------
-     * `readFailed` means "the stored history is unknown, so a write could destroy
-     * it". A successful `removeItem` retires exactly that condition: the key no
-     * longer exists, so there is no unread history left for a write to overwrite.
-     * The refusal is therefore no longer protecting anything, and the store is
-     * back in the same state a successful read would have left it in.
-     *
-     * WHY IT USED TO STICK — the permanently-unrecordable store
-     * ---------------------------------------------------------
-     * The flag was left set, and because `cache` is `[]` rather than `null` here,
-     * every later `read()` takes the cache-first early return and so never
-     * reaches the line that clears `readFailed` on a good read. The store was
-     * therefore stuck for the rest of the process: every `saveSession` rejected
-     * with "session history could not be read; refusing to overwrite it" even
-     * though the user had just deleted that history themselves.
-     *
-     * Reaching it needs a read to have failed first (a transient storage error),
-     * which is exactly the situation a user is most likely to clear their history
-     * in. The exercise session screen absorbs a save rejection, so the next
-     * session the user finished showed a result screen and then silently left no
-     * trace in their history, with nothing to tell them why.
-     *
-     * QUEUED, AND THE ORDERING RULE FOR save + clear
-     * ----------------------------------------------
-     * A clear is queued like any other mutation, so the two of them take effect in
-     * the order the app called them: a `saveSession` awaited (or merely issued)
-     * before `clearSessions` is erased by that clear, and one issued after it
-     * survives. Interleaving them would leave the outcome up to whichever storage
-     * write happened to land last, which is not a rule a caller could reason about.
-     *
-     * The epoch is bumped BEFORE the key is removed rather than after. A read that
-     * settles while `removeItem` is still pending is already describing a history
-     * the user has asked to delete, and must not be able to publish it - and
-     * because a clear sets the cache to `[]` itself, nothing legitimate is lost by
-     * invalidating that early: every later save still reads and writes normally.
+     * Explicitly clearing the key retires an unreadable/partial-history guard:
+     * there is no previous history left for a later save to accidentally erase.
+     * Clear remains queued with other mutations, and bumps the read epoch before
+     * removal so an older in-flight read cannot restore the deleted records.
      */
     clearSessions() {
       return enqueue(async () => {
         storedEpoch += 1;
         await store.removeItem(SESSION_HISTORY_KEY);
         cache = [];
-        readFailed = false;
+        cacheIssue = null;
+        historyUnreadable = false;
       });
     },
   };

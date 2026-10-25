@@ -104,7 +104,7 @@ export default function ActivitiesScreen() {
             <SymbolView
               name={activity.icon}
               size={26}
-              tintColor={activity.tint === 'accent' ? theme.accent : theme.accentSecondary}
+              tintColor={activity.tint === 'accent' ? theme.accentStrong : theme.accentSecondary}
             />
           }
           title={activity.title}

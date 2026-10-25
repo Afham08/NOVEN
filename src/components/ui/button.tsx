@@ -4,7 +4,7 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, type PressableProps, ty
 import { Radius, Spacing, Type } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
-export type ButtonVariant = 'primary' | 'secondary' | 'outline' | 'ghost';
+export type ButtonVariant = 'primary' | 'secondary' | 'outline' | 'ghost' | 'destructive';
 export type ButtonSize = 'large' | 'medium';
 
 export type ButtonProps = PressableProps & {
@@ -50,7 +50,7 @@ export function Button({
 }: ButtonProps) {
   const theme = useTheme();
 
-  const filled = variant === 'primary' || variant === 'secondary';
+  const filled = variant === 'primary' || variant === 'secondary' || variant === 'destructive';
 
   /*
    * A filled control is the thing being looked at, so it carries its own
@@ -71,15 +71,19 @@ export function Button({
    */
   const background = filled
     ? variant === 'primary'
-      ? theme.accent
-      : theme.accentSecondary
+      ? theme.accentStrong
+      : variant === 'secondary'
+        ? theme.accentSecondary
+        : theme.danger
     : 'transparent';
   const foreground = filled
-    ? theme.onAccent
+    ? variant === 'destructive'
+      ? theme.onDanger
+      : theme.onAccent
     : variant === 'outline'
-      ? theme.accent
+      ? theme.accentStrong
       : theme.text;
-  const border = variant === 'outline' ? { borderWidth: 1.5, borderColor: theme.accent } : undefined;
+  const border = variant === 'outline' ? { borderWidth: 1.5, borderColor: theme.accentStrong } : undefined;
 
   return (
     <Pressable

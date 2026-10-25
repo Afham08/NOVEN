@@ -57,7 +57,7 @@ export function parseThemePreference(raw: string | null | undefined): ThemePrefe
 export type ThemePreferenceStore = {
   /** The stored preference, or 'system' when unset or unreadable. */
   load(): Promise<ThemePreference>;
-  /** Stores a preference. Rejects nothing; a failed write leaves the old value. */
+  /** Stores a preference; rejects on storage failure without changing the old value. */
   save(preference: ThemePreference): Promise<void>;
   /** Forgets the preference, returning the app to following the phone. */
   clear(): Promise<void>;
@@ -83,4 +83,79 @@ export function createThemePreferenceStore(store: KeyValueStore): ThemePreferenc
       await store.removeItem(THEME_PREFERENCE_KEY);
     },
   };
+}
+
+export type ThemePreferenceSnapshot = {
+  preference: ThemePreference;
+  ready: boolean;
+};
+
+type ThemePreferenceListener = (snapshot: ThemePreferenceSnapshot) => void;
+
+/** Coordinates the provider's optimistic UI with its asynchronous local store. */
+export class ThemePreferenceController {
+  private preference = DEFAULT_THEME_PREFERENCE;
+  private persistedPreference = DEFAULT_THEME_PREFERENCE;
+  private ready = false;
+  private selectionVersion = 0;
+  private loadPromise: Promise<void> | null = null;
+  private saveQueue: Promise<void> = Promise.resolve();
+  private readonly listeners = new Set<ThemePreferenceListener>();
+
+  constructor(private readonly store: ThemePreferenceStore) {}
+
+  getSnapshot(): ThemePreferenceSnapshot {
+    return { preference: this.preference, ready: this.ready };
+  }
+
+  subscribe(listener: ThemePreferenceListener): () => void {
+    this.listeners.add(listener);
+    listener(this.getSnapshot());
+    return () => this.listeners.delete(listener);
+  }
+
+  /** Loads once; a later user selection always takes precedence over this read. */
+  load(): Promise<void> {
+    if (!this.loadPromise) {
+      this.loadPromise = this.store
+        .load()
+        .catch(() => DEFAULT_THEME_PREFERENCE)
+        .then((stored) => {
+          this.persistedPreference = stored;
+          if (this.selectionVersion === 0) this.preference = stored;
+          this.ready = true;
+          this.publish();
+        });
+    }
+    return this.loadPromise;
+  }
+
+  /** Updates immediately, serializes writes, and rolls back only the latest failed choice. */
+  setPreference(next: ThemePreference): Promise<void> {
+    const version = ++this.selectionVersion;
+    this.preference = next;
+    this.publish();
+
+    const save = this.saveQueue.then(async () => {
+      // Resolve the old value before writing, including when selection happens
+      // before the provider's initial read has completed.
+      await this.load();
+      try {
+        await this.store.save(next);
+        this.persistedPreference = next;
+      } catch {
+        if (version === this.selectionVersion) {
+          this.preference = this.persistedPreference;
+          this.publish();
+        }
+      }
+    });
+    this.saveQueue = save;
+    return save;
+  }
+
+  private publish(): void {
+    const snapshot = this.getSnapshot();
+    for (const listener of this.listeners) listener(snapshot);
+  }
 }

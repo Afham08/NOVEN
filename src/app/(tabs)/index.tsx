@@ -8,6 +8,7 @@ import { Screen } from '@/components/layout/screen';
 import { Button } from '@/components/ui/button';
 import { Header } from '@/components/ui/header';
 import { SectionHeader } from '@/components/ui/section-header';
+import { SessionHistoryLoadNotice } from '@/components/session/session-history-load-notice';
 import { Radius } from '@/constants/theme';
 import { useProgress } from '@/hooks/use-progress';
 import { useTheme } from '@/hooks/use-theme';
@@ -33,7 +34,7 @@ export default function HomeScreen() {
   const router = useRouter();
 
   /** One read of the stored history feeds the progress card. */
-  const { summary, totalSessions } = useProgress(sessionStore);
+  const { summary, totalSessions, issue, retry } = useProgress(sessionStore);
 
   return (
     <Screen>
@@ -50,12 +51,14 @@ export default function HomeScreen() {
         show, and never shows a placeholder number.
       */}
       <ScoreCard
-        variant="inverse"
+        variant="surface"
         emphasis="sage"
         score={summary?.latest?.score}
         label="Progress score"
         hint={progressHint(summary, totalSessions)}
       />
+
+      {issue ? <SessionHistoryLoadNotice issue={issue} onRetry={retry} /> : null}
 
       <SectionHeader accent title="Today" subtitle="Pick where to begin today." />
 
@@ -65,7 +68,7 @@ export default function HomeScreen() {
           <SymbolView
             name={{ ios: 'square.grid.2x2', android: 'apps', web: 'apps' }}
             size={26}
-            tintColor={theme.accent}
+            tintColor={theme.accentStrong}
           />
         }
         title="Choose an activity"

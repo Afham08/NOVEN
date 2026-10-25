@@ -32,7 +32,7 @@
  * exactly one definition of the session's phases. The screen owns the state
  * machine that drives them; the timer has to be able to describe all of them.
  */
-export type SessionPhase = 'ready' | 'running' | 'paused' | 'completed';
+export type SessionPhase = 'ready' | 'running' | 'paused' | 'completed' | 'tracking-error';
 
 /**
  * What the status chip says, next to the camera feed.
@@ -46,6 +46,7 @@ const PHASE_LABEL: Readonly<Record<SessionPhase, string>> = {
   running: 'Session in progress',
   paused: 'Paused',
   completed: 'Session complete',
+  'tracking-error': 'Tracking stopped',
 };
 
 /**
@@ -65,6 +66,7 @@ const TIMER_CAPTION: Readonly<Record<SessionPhase, string>> = {
   running: 'Session in progress',
   paused: 'Session paused',
   completed: 'Session complete',
+  'tracking-error': 'Tracking stopped',
 };
 
 /** The status chip's wording for a phase. */

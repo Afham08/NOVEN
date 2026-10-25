@@ -27,6 +27,28 @@ const read = (...segments: string[]) => fs.readFileSync(fromApp(...segments), 'u
 const readComponent = (...segments: string[]) => fs.readFileSync(fromComponents(...segments), 'utf8');
 const exists = (...segments: string[]) => fs.existsSync(fromApp(...segments));
 
+function paletteColors(source: string, mode: 'light' | 'dark'): Record<string, string> {
+  const block = source.match(new RegExp(`\\b${mode}: \\{([\\s\\S]*?)\\n  \\},`))?.[1] ?? '';
+  const result: Record<string, string> = {};
+  for (const match of block.matchAll(/([A-Za-z][A-Za-z0-9]*):\s*'(#[0-9A-Fa-f]{6})'/g)) {
+    result[match[1]] = match[2];
+  }
+  return result;
+}
+
+function relativeLuminance(color: string): number {
+  const channels = [0, 2, 4].map((offset) => {
+    const value = Number.parseInt(color.slice(offset + 1, offset + 3), 16) / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+
+function contrastRatio(foreground: string, background: string): number {
+  const values = [relativeLuminance(foreground), relativeLuminance(background)].sort((a, b) => b - a);
+  return (values[0] + 0.05) / (values[1] + 0.05);
+}
+
 /** Removes comments so they cannot be mistaken for wording a reader would see. */
 function stripComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/.*$/gm, '$1');
@@ -121,6 +143,94 @@ export function run() {
     for (const tab of PRIMARY_TABS) {
       check(`the ${tab} tab has a route file`, exists('(tabs)', `${tab}.tsx`));
     }
+  });
+
+  suite('theme: native tabs follow the app appearance preference', () => {
+    const nativeTabs = readComponent('app-tabs.tsx');
+    const themeHook = fs.readFileSync(fromSrc('hooks', 'use-theme.ts'), 'utf8');
+
+    check('native tabs read colors from the shared useTheme hook', nativeTabs.includes('const colors = useTheme()'));
+    check('native tabs do not resolve the phone scheme independently', !nativeTabs.includes('useColorScheme'));
+    check('the shared hook reads the saved preference', themeHook.includes('useThemePreference'));
+    check('Light and Dark preferences override the system scheme',
+      themeHook.includes("if (preference === 'light') return Colors.light") &&
+        themeHook.includes("if (preference === 'dark') return Colors.dark"));
+    check('System preference follows the device scheme',
+      themeHook.includes("Colors[deviceScheme === 'dark' ? 'dark' : 'light']"));
+  });
+
+  suite('theme: semantic palettes keep foregrounds readable', () => {
+    const source = fs.readFileSync(fromSrc('constants', 'theme.ts'), 'utf8');
+    const palettes = {
+      light: paletteColors(source, 'light'),
+      dark: paletteColors(source, 'dark'),
+    };
+
+    for (const [mode, colors] of Object.entries(palettes)) {
+      for (const role of [
+        'accentStrong', 'success', 'successSoft', 'warning', 'warningSoft',
+        'danger', 'dangerSoft', 'onDanger', 'onAccent', 'cameraSurface',
+      ]) {
+        check(`${mode} palette defines ${role}`, colors[role] !== undefined);
+      }
+
+      const pairs: Array<[string, string, string]> = [
+        ['accent foreground', colors.accentStrong, colors.background],
+        ['primary button label', colors.onAccent, colors.accentStrong],
+        ['inverse hero accent', colors.accentOnInverse, colors.surfaceInverse],
+        ['inverse score accent', colors.scoreAccentOnInverse, colors.surfaceInverse],
+        ['inverse score sage', colors.scoreSageOnInverse, colors.surfaceInverse],
+        ['success status', colors.success, colors.successSoft],
+        ['warning status', colors.warning, colors.warningSoft],
+        ['error status', colors.danger, colors.dangerSoft],
+        ['destructive button label', colors.onDanger, colors.danger],
+      ];
+      for (const [label, foreground, background] of pairs) {
+        const ratio = contrastRatio(foreground, background);
+        check(`${mode} ${label} contrast is at least 4.5:1`, ratio >= 4.5, `${ratio.toFixed(2)}:1`);
+      }
+    }
+  });
+
+  suite('theme: screens and navigation consume semantic presentation tokens', () => {
+    const root = read('_layout.tsx');
+    const tabs = readComponent('app-tabs.tsx');
+    const home = read('(tabs)', 'index.tsx');
+    const progress = read('(tabs)', 'progress.tsx');
+    const themedText = readComponent('themed-text.tsx');
+    const statusChip = readComponent('ui', 'status-chip.tsx');
+    const cameraPlaceholder = readComponent('session', 'camera-placeholder.tsx');
+    const historyError = readComponent('session', 'session-history-load-notice.tsx');
+    const exerciseResult = read('exercise', 'result.tsx');
+    const guidedResult = read('activity-result.tsx');
+    const privacy = read('settings', 'privacy.tsx');
+    const button = readComponent('ui', 'button.tsx');
+
+    check('root native navigation uses the semantic palette',
+      root.includes('primary: palette.accentStrong') &&
+        root.includes('background: palette.background') &&
+        root.includes('card: palette.backgroundElement') &&
+        root.includes('text: palette.text') &&
+        root.includes('border: palette.border'));
+    check('root status bar follows the selected Light/Dark palette',
+      root.includes("barStyle={isDark ? 'light-content' : 'dark-content'}") &&
+        root.includes('backgroundColor={palette.background}'));
+    check('native tab icon tint uses the saved theme palette', tabs.includes('tintColor={colors.accentStrong}'));
+    check('Home score summary uses the Light-aware surface variant', /<ScoreCard[\s\S]*?variant="surface"/.test(home));
+    check('Progress score summary uses the Light-aware surface variant', /<ScoreCard[\s\S]*?variant="surface"/.test(progress));
+    check('primary links use the active semantic accent', themedText.includes('theme.accentStrong') && !themedText.includes('Colors.light.accent'));
+    check('status dots use semantic accent roles rather than palette literals',
+      statusChip.includes('theme.accentStrong') && statusChip.includes('theme.accentSecondary') && !/#(?:[0-9A-Fa-f]{3,8})\b/.test(statusChip));
+    check('camera fallback follows the theme and distinguishes required-camera warning from optional use',
+      cameraPlaceholder.includes('useTheme()') && cameraPlaceholder.includes('theme.warningSoft') && cameraPlaceholder.includes('theme.backgroundElement'));
+    check('History load errors use an accessible semantic danger surface',
+      historyError.includes('accessibilityRole="alert"') && historyError.includes('theme.dangerSoft') && historyError.includes('theme.danger'));
+    check('exercise history-save states distinguish success from failure',
+      exerciseResult.includes('theme.success') && exerciseResult.includes('theme.danger'));
+    check('guided history-save states distinguish success from failure',
+      guidedResult.includes('theme.success') && guidedResult.includes('theme.danger'));
+    check('Privacy deletion uses the semantic destructive button treatment',
+      privacy.includes('variant="destructive"') && button.includes('variant === \'destructive\'') && button.includes('theme.onDanger'));
   });
 
   suite('navigation: activities are grouped, not given their own tabs', () => {

@@ -22,6 +22,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.lifecycle.awaitInstance
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.LiveData
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Observer
 import expo.modules.kotlin.AppContext
@@ -78,19 +79,30 @@ class PoseTrackerView(
 
   private val onFrame by EventDispatcher<CameraFrameEvent>()
   private val onPoseFrame by EventDispatcher<PoseFrameEvent>()
+  private val onError by EventDispatcher<PoseTrackerErrorEvent>()
 
   private val disposed = AtomicBoolean(false)
+  private val failureEventEmitted = AtomicBoolean(false)
+  private val cameraHasOpened = AtomicBoolean(false)
   private val frameDiagDone = AtomicBoolean(false)
+  private var cameraStateLiveData: LiveData<CameraState>? = null
+  private var cameraStateObserver: Observer<CameraState>? = null
 
-  private val poseTrackerProcessor = PoseTrackerProcessor(context) { poseFrame ->
-    if (!disposed.get()) {
-      onPoseFrame(poseFrame)
-    }
-  }
+  private val poseTrackerProcessor = PoseTrackerProcessor(
+    context,
+    onPoseFrame = { poseFrame ->
+      if (!disposed.get() && !failureEventEmitted.get()) onPoseFrame(poseFrame)
+    },
+    onFatalError = ::reportFailure
+  )
 
   private val scope = CoroutineScope(
     Dispatchers.Main + SupervisorJob() + CoroutineExceptionHandler { _, throwable ->
       Log.e(TAG, "Unhandled camera coroutine exception", throwable)
+      reportFailure(
+        "camera-startup",
+        "The camera could not start. Return to exercises and reopen the session."
+      )
     }
   )
 
@@ -116,6 +128,10 @@ class PoseTrackerView(
       try {
         if (!hasCameraPermission()) {
           Log.w(TAG, "Camera permission is not granted, camera will not start.")
+          reportFailure(
+            "camera-permission",
+            "Camera permission is unavailable. Allow camera access, then reopen the session."
+          )
           return@launch
         }
         Log.d(TAG, "Camera permission granted.")
@@ -123,6 +139,10 @@ class PoseTrackerView(
         val activity = appContext.throwingActivity
         if (activity !is LifecycleOwner) {
           Log.e(TAG, "Current activity is not a LifecycleOwner, camera will not start.")
+          reportFailure(
+            "camera-startup",
+            "The camera could not start. Return to exercises and reopen the session."
+          )
           return@launch
         }
 
@@ -199,8 +219,10 @@ class PoseTrackerView(
             .build()
             .also {
               it.setAnalyzer(analysisExecutor) { imageProxy ->
-                val count = frameCount.incrementAndGet()
-                if (!disposed.get()) {
+                if (disposed.get() || failureEventEmitted.get()) {
+                  imageProxy.close()
+                } else {
+                  val count = frameCount.incrementAndGet()
                   val tsNs = imageProxy.imageInfo.timestamp
                   val nowMs = SystemClock.elapsedRealtime()
                   val lastEmit = lastEmitAt.get()
@@ -215,11 +237,11 @@ class PoseTrackerView(
                       )
                     )
                   }
+                  if (frameDiagDone.compareAndSet(false, true)) {
+                    diagnoseFrameOnce(imageProxy)
+                  }
+                  poseTrackerProcessor.processFrame(imageProxy)
                 }
-                if (frameDiagDone.compareAndSet(false, true)) {
-                  diagnoseFrameOnce(imageProxy)
-                }
-                poseTrackerProcessor.processFrame(imageProxy)
               }
             }
         } else {
@@ -259,18 +281,30 @@ class PoseTrackerView(
         logPreviewViewHierarchy("after-bind")
         logPreviewViewChildren("after-bind")
         val stateObserver = Observer<CameraState> { state ->
+          if (state.type == CameraState.Type.OPEN) cameraHasOpened.set(true)
           val error = state.error
           if (error != null) {
             Log.e(
               TAG,
               "[DIAG] cameraState=${state.type} errorCode=${error.code} errorCause=${error.cause?.message}"
             )
+            reportFailure(
+              if (cameraHasOpened.get()) "camera-runtime" else "camera-startup",
+              if (cameraHasOpened.get()) {
+                "The camera stopped unexpectedly. Return to exercises and reopen the session."
+              } else {
+                "The camera could not start. Return to exercises and reopen the session."
+              }
+            )
           } else {
             Log.i(TAG, "[DIAG] cameraState=${state.type} (no error)")
           }
         }
         (activity as LifecycleOwner).let { owner ->
-          camera.cameraInfo.cameraState.observe(owner, stateObserver)
+          val cameraState = camera.cameraInfo.cameraState
+          cameraStateLiveData = cameraState
+          cameraStateObserver = stateObserver
+          cameraState.observe(owner, stateObserver)
         }
         previewView.post {
           val pvLoc = IntArray(2)
@@ -314,7 +348,20 @@ class PoseTrackerView(
         }, 3000)
       } catch (e: Exception) {
         Log.e(TAG, "Failed to start camera: ${e.message ?: e.javaClass.simpleName}", e)
+        reportFailure(
+          "camera-startup",
+          "The camera could not start. Return to exercises and reopen the session."
+        )
       }
+    }
+  }
+
+  private fun reportFailure(category: String, message: String) {
+    if (disposed.get() || !failureEventEmitted.compareAndSet(false, true)) return
+    try {
+      onError(PoseTrackerErrorEvent(category, message))
+    } catch (e: Exception) {
+      Log.e(TAG, "Could not deliver camera or pose-tracker failure to JavaScript.", e)
     }
   }
 
@@ -748,6 +795,14 @@ class PoseTrackerView(
 
     // Stop the async camera-start coroutine so it cannot bind after disposal.
     scope.cancel()
+
+    val state = cameraStateLiveData
+    val observer = cameraStateObserver
+    cameraStateLiveData = null
+    cameraStateObserver = null
+    if (state != null && observer != null) {
+      ContextCompat.getMainExecutor(context).execute { state.removeObserver(observer) }
+    }
 
     // Unbind CameraX asynchronously without blocking the main thread.
     try {

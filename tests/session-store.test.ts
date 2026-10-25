@@ -8,6 +8,7 @@ import {
   dayLabel,
   MAX_SAVED_SESSIONS,
   parseSessionHistory,
+  parseSessionHistoryResult,
   parseSessionRecord,
   SESSION_HISTORY_KEY,
   type KeyValueStore,
@@ -300,19 +301,94 @@ export function run(): void {
     check('an id that is not a string is rejected', parseSessionRecord({ ...record('a', '2026-09-27T10:00:00.000Z'), id: 7 }) === null);
   });
 
-  suite('session history: a corrupt entry is dropped and the good ones survive', async () => {
+  suite('session history: a corrupt entry is reported while good records survive', async () => {
     const good = record('good', '2026-09-27T10:00:00.000Z');
     const alsoGood = record('also-good', '2026-09-26T10:00:00.000Z');
     // One unreadable record sitting between two valid ones.
-    const store = createSessionStore(
-      fakeStore({
-        [SESSION_HISTORY_KEY]: JSON.stringify([good, { id: 'broken' }, alsoGood]),
-      }),
-    );
+    const seed = JSON.stringify([good, { id: 'broken' }, alsoGood]);
+    const backing = fakeStore({ [SESSION_HISTORY_KEY]: seed });
+    const store = createSessionStore(backing);
 
-    const all = await store.getSessions();
+    const result = await store.getSessionsResult();
+    check('the read is marked partial rather than empty or fully successful', result.status === 'partial');
+    if (result.status === 'error') return;
+    const all = result.records;
     check('the valid sessions are still readable', all.length === 2, all.map((r) => r.id));
     check('and still ordered newest first', all[0].id === 'good', all.map((r) => r.id));
+    check('the issue identifies malformed stored entries', result.status === 'partial' && result.issue.kind === 'malformed');
+
+    let refused = false;
+    try {
+      await store.saveSession(record('new', '2026-09-28T10:00:00.000Z'));
+    } catch {
+      refused = true;
+    }
+    check('a later save refuses to overwrite partially unreadable history', refused);
+    check('the original malformed blob is left unchanged', backing.data[SESSION_HISTORY_KEY] === seed);
+    check('no write was attempted', backing.writes === 0, backing.writes);
+  });
+
+  suite('session history load result: populated and genuinely empty reads are distinct successes', async () => {
+    const saved = record('saved', '2026-09-27T10:00:00.000Z');
+    const populated = await createSessionStore(
+      fakeStore({ [SESSION_HISTORY_KEY]: JSON.stringify([saved]) }),
+    ).getSessionsResult();
+    check(
+      'a valid stored session is a successful populated load',
+      populated.status === 'loaded' && populated.records.length === 1 && populated.records[0].id === 'saved',
+      populated,
+    );
+
+    const empty = await createSessionStore(fakeStore()).getSessionsResult();
+    check('a missing history key is a successful empty load', empty.status === 'loaded' && empty.records.length === 0, empty);
+    const emptyArray = parseSessionHistoryResult('[]');
+    check('an explicit empty array is also a successful empty load',
+      emptyArray.status === 'loaded' && emptyArray.records.length === 0);
+  });
+
+  suite('session history load result: storage failures remain errors and retry', async () => {
+    const saved = record('kept', '2026-09-27T10:00:00.000Z');
+    const seed = JSON.stringify([saved]);
+    const backing = fakeStore({ [SESSION_HISTORY_KEY]: seed }, false, 1);
+    const store = createSessionStore(backing);
+
+    const first = await store.getSessionsResult();
+    check('a failed read is not reported as a successful empty history',
+      first.status === 'error' && first.issue.kind === 'storage', first);
+    check('the failed attempt does not rewrite storage', backing.data[SESSION_HISTORY_KEY] === seed && backing.writes === 0);
+
+    const retry = await store.getSessionsResult();
+    check('retry succeeds when storage recovers',
+      retry.status === 'loaded' && retry.records.length === 1 && retry.records[0].id === 'kept', retry);
+    check('retry reads the device again instead of caching the failure', backing.reads === 2, backing.reads);
+  });
+
+  suite('session history load result: malformed top-level data is not empty and cannot be overwritten', async () => {
+    const seed = '{"broken":';
+    const backing = fakeStore({ [SESSION_HISTORY_KEY]: seed });
+    const store = createSessionStore(backing);
+
+    const result = await store.getSessionsResult();
+    check('malformed JSON is reported as a malformed-data error',
+      result.status === 'error' && result.issue.kind === 'malformed', result);
+    check('the legacy parser remains non-throwing and returns no usable records',
+      parseSessionHistory(seed).length === 0);
+
+    let refused = false;
+    try {
+      await store.saveSession(record('new', '2026-09-28T10:00:00.000Z'));
+    } catch {
+      refused = true;
+    }
+    check('saving refuses to replace malformed stored data', refused);
+    check('the original malformed bytes remain untouched', backing.data[SESSION_HISTORY_KEY] === seed);
+    check('the failed save performs no storage write', backing.writes === 0, backing.writes);
+
+    const malformedRecords = await createSessionStore(
+      fakeStore({ [SESSION_HISTORY_KEY]: JSON.stringify([{ id: 'invalid-only' }]) }),
+    ).getSessionsResult();
+    check('a valid JSON array with no valid session records is still reported as malformed',
+      malformedRecords.status === 'error' && malformedRecords.issue.kind === 'malformed', malformedRecords);
   });
 
   suite('session history: unreadable storage degrades to an empty history', async () => {
@@ -604,5 +680,40 @@ export function run(): void {
       'an unmeasured day is hidden rather than shown as a blank',
       code.includes('day !== null'),
     );
+  });
+
+  suite('session history UI: load failures are visible and retryable', () => {
+    const nodeRequire = require as unknown as (id: string) => {
+      readFileSync(path: string, encoding: 'utf8'): string;
+      resolve(...segments: string[]): string;
+    };
+    const fs = nodeRequire('fs');
+    const paths = nodeRequire('path');
+    const read = (relative: string) =>
+      fs.readFileSync(paths.resolve(__dirname, `../../${relative}`), 'utf8');
+    const history = read('src/components/session/session-history.tsx');
+    const notice = read('src/components/session/session-history-load-notice.tsx');
+    const progressHook = read('src/hooks/use-progress.ts');
+    const progressScreen = read('src/app/(tabs)/progress.tsx');
+    const homeScreen = read('src/app/(tabs)/index.tsx');
+
+    check('the standalone history uses the detailed store result', history.includes('getSessionsResult()'));
+    check('history renders an error instead of its empty state on failed reads',
+      history.includes('if (records === null)') && history.includes('SessionHistoryLoadNotice'));
+    check('the history retry invokes a fresh focus-scoped read',
+      history.includes('retryLoader.current = load') && history.includes('retryLoader.current?.()'));
+    check('the notice uses an alert role and assertive live announcement',
+      notice.includes('accessibilityRole="alert"') && notice.includes('accessibilityLiveRegion="assertive"'));
+    check('the notice provides a retry button', notice.includes('title="Try again"') && notice.includes('onPress={onRetry}'));
+    check('storage and malformed-data failures have distinct wording',
+      notice.includes('could not be loaded from this device') &&
+        notice.includes('stored session history could not be read'));
+    check('Progress uses the detailed shared read and retry handler',
+      progressHook.includes('getSessionsResult()') && progressHook.includes('retry: () => void'));
+    check('Progress displays the shared load issue and supplies one record list to History',
+      progressScreen.includes('<SessionHistoryLoadNotice issue={issue} onRetry={retry} />') &&
+        progressScreen.includes('loadedRecords={records}'));
+    check('Home also makes failed progress reads visible with retry',
+      homeScreen.includes('<SessionHistoryLoadNotice issue={issue} onRetry={retry} />'));
   });
 }

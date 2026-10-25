@@ -8,9 +8,14 @@ import { createDiagnostics, readinessDiagnostics, readinessDiagnosticsEnabled } 
 import { ReadinessGate, type ReadinessPhase } from './stabilize';
 import type { ExerciseConfig, Side } from './types';
 
+/** Ignore long camera stalls rather than counting the whole gap as active time. */
+const MAX_ACTIVE_FRAME_GAP_MS = 1000;
+
 /** What the session HUD should display after processing one pose frame. */
 export type SessionFrameResult = {
   reps: number;
+  /** Whole seconds of time spent in a ready, actively tracked position. */
+  elapsedSeconds: number;
   feedback: FeedbackCue;
   /** True only on the frame a rep was counted. */
   repCompletedThisFrame: boolean;
@@ -63,6 +68,10 @@ export class SessionEngine {
   private range: { min: number; max: number } | null = null;
   /** Set by end(); makes the engine permanently inert until reset(). */
   private stopped = false;
+  /** Active ready-time accumulated from the monotonic pose-frame timeline. */
+  private activeTimeMs = 0;
+  /** Previous frame timestamp while readiness remains continuously granted. */
+  private activeFrameTimestampMs: number | null = null;
   private lastFeedback: FeedbackCue;
 
   /**
@@ -92,6 +101,11 @@ export class SessionEngine {
     return this.countedReps;
   }
 
+  /** Whole seconds accumulated while ready; fractions remain for the next frame. */
+  get elapsedSeconds(): number {
+    return Math.floor(this.activeTimeMs / 1000);
+  }
+
   /** Ranges (deg) of every counted rep, in completion order. */
   get repRanges(): number[] {
     return [...this.countedRanges];
@@ -119,6 +133,8 @@ export class SessionEngine {
     this.latch.clear();
     this.range = null;
     this.stopped = false;
+    this.activeTimeMs = 0;
+    this.activeFrameTimestampMs = null;
     this.countedReps = 0;
     this.countedRanges = [];
     this.lastCountedAtMs = null;
@@ -138,9 +154,15 @@ export class SessionEngine {
   pause(): SessionFrameResult {
     this.detectors.left.freeze();
     this.detectors.right.freeze();
+    this.activeFrameTimestampMs = null;
     this.latch.clear();
     this.lastFeedback = pausedFeedback();
-    return { reps: this.reps, feedback: this.lastFeedback, repCompletedThisFrame: false };
+    return {
+      reps: this.reps,
+      elapsedSeconds: this.elapsedSeconds,
+      feedback: this.lastFeedback,
+      repCompletedThisFrame: false,
+    };
   }
 
   /**
@@ -153,6 +175,7 @@ export class SessionEngine {
    */
   end(): void {
     this.stopped = true;
+    this.activeFrameTimestampMs = null;
     this.detectors.left.freeze();
     this.detectors.right.freeze();
     this.latch.clear();
@@ -165,7 +188,12 @@ export class SessionEngine {
    */
   handlePoseFrame(event: { nativeEvent: PoseFrameEventPayload }): SessionFrameResult {
     if (this.stopped) {
-      return { reps: this.reps, feedback: this.lastFeedback, repCompletedThisFrame: false };
+      return {
+        reps: this.reps,
+        elapsedSeconds: this.elapsedSeconds,
+        feedback: this.lastFeedback,
+        repCompletedThisFrame: false,
+      };
     }
 
     const { timestampMs, presence, landmarks } = event.nativeEvent;
@@ -177,6 +205,7 @@ export class SessionEngine {
       // detectors, so the partial cycle is discarded and re-entry has to earn
       // readiness again from scratch.
       this.gate.markLost();
+      this.activeFrameTimestampMs = null;
       left.freeze();
       right.freeze();
       this.latch.clear();
@@ -196,6 +225,7 @@ export class SessionEngine {
     // leaves that regime when the knee extends. See ReadinessConfig.
     if (outcome.becameReady && !this.restingPostureSatisfied(landmarks)) {
       this.gate.markLost();
+      this.activeFrameTimestampMs = null;
       left.freeze();
       right.freeze();
       this.latch.clear();
@@ -204,12 +234,15 @@ export class SessionEngine {
     }
 
     if (this.gate.currentPhase !== 'ready') {
+      this.activeFrameTimestampMs = null;
       left.freeze();
       right.freeze();
       this.latch.clear();
       this.traceReadiness(landmarks, timestampMs, outcome);
       return this.emit(readinessFeedback(this.gate.currentPhase));
     }
+
+    this.updateActiveTime(timestampMs);
 
     let repCompletedThisFrame = false;
     for (const side of this.config.sides) {
@@ -323,6 +356,24 @@ export class SessionEngine {
   }
 
   /**
+   * Accumulates time only across consecutive ready frames. A newly-ready frame
+   * establishes the clock anchor; readiness loss and pause clear that anchor.
+   * Duplicate/out-of-order stamps add nothing, and camera stalls are capped.
+   */
+  private updateActiveTime(timestampMs: number): void {
+    const previousTimestampMs = this.activeFrameTimestampMs;
+    if (previousTimestampMs !== null && timestampMs > previousTimestampMs) {
+      this.activeTimeMs += Math.min(
+        timestampMs - previousTimestampMs,
+        MAX_ACTIVE_FRAME_GAP_MS,
+      );
+      this.activeFrameTimestampMs = timestampMs;
+      return;
+    }
+    if (previousTimestampMs === null) this.activeFrameTimestampMs = timestampMs;
+  }
+
+  /**
    * Whether the tracked joints are inside the exercise's rest regime at the
    * moment readiness would be granted.
    *
@@ -370,6 +421,11 @@ export class SessionEngine {
   /** Records the cue the HUD is now showing and builds the frame result. */
   private emit(feedback: FeedbackCue, repCompletedThisFrame = false): SessionFrameResult {
     this.lastFeedback = feedback;
-    return { reps: this.reps, feedback, repCompletedThisFrame };
+    return {
+      reps: this.reps,
+      elapsedSeconds: this.elapsedSeconds,
+      feedback,
+      repCompletedThisFrame,
+    };
   }
 }

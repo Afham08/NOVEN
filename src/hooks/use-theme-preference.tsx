@@ -3,6 +3,7 @@ import { createContext, createElement, useCallback, useContext, useEffect, useMe
 import { themePreferenceStore } from '@/settings/theme-preference-storage';
 import {
   DEFAULT_THEME_PREFERENCE,
+  ThemePreferenceController,
   THEME_PREFERENCE_OPTIONS,
   type ThemePreference,
 } from '@/settings/theme-preference';
@@ -50,34 +51,22 @@ type ThemePreferenceContextValue = {
 const ThemePreferenceContext = createContext<ThemePreferenceContextValue | null>(null);
 
 export function ThemePreferenceProvider({ children }: { children: ReactNode }) {
-  const [preference, setPreferenceState] = useState<ThemePreference>(DEFAULT_THEME_PREFERENCE);
-  const [ready, setReady] = useState(false);
+  const [controller] = useState(() => new ThemePreferenceController(themePreferenceStore));
+  const [snapshot, setSnapshot] = useState(() => controller.getSnapshot());
 
   useEffect(() => {
-    let active = true;
-    void themePreferenceStore.load().then((stored) => {
-      if (!active) return;
-      setPreferenceState(stored);
-      setReady(true);
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
+    const unsubscribe = controller.subscribe(setSnapshot);
+    void controller.load();
+    return unsubscribe;
+  }, [controller]);
 
   const setPreference = useCallback((next: ThemePreference) => {
-    setPreferenceState(next);
-    void themePreferenceStore.save(next).catch(() => {
-      // The write failed, so the stored value is still the old one. Put the
-      // screen back to the truth rather than leaving a choice on display that
-      // will not survive a restart.
-      setPreferenceState(DEFAULT_THEME_PREFERENCE);
-    });
-  }, []);
+    void controller.setPreference(next);
+  }, [controller]);
 
   const value = useMemo<ThemePreferenceContextValue>(
-    () => ({ preference, ready, setPreference }),
-    [preference, ready, setPreference],
+    () => ({ ...snapshot, setPreference }),
+    [snapshot, setPreference],
   );
 
   return createElement(ThemePreferenceContext.Provider, { value }, children);

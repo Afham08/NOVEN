@@ -4,6 +4,7 @@ import { PermissionsAndroid, Platform, StyleSheet, Text, View } from 'react-nati
 
 import {
   PoseTrackerView,
+  type PoseTrackerErrorPayload,
   type PoseFrameEventPayload,
 } from '../../../modules/pose-tracker';
 import { Screen } from '@/components/layout/screen';
@@ -19,9 +20,15 @@ import { completedFeedback, pausedFeedback, setupFeedback, type FeedbackCue } fr
 import { buildSessionMetrics, formatConsistencyLabel, formatDurationLabel, formatPaceLabel, formatRangeLabel } from '@/exercise/metrics';
 import { getExerciseConfig } from '@/exercise/pose-configs';
 import { createSessionId, createSessionRecord } from '@/exercise/session-store';
+import { sessionSaveStatusTracker } from '@/exercise/session-save-status';
 import { sessionPhaseLabel, type SessionPhase } from '@/exercise/session-phase';
 import { sessionStore } from '@/exercise/session-storage';
 import { SessionEngine } from '@/exercise/session-engine';
+import {
+  PoseTrackerFailureGate,
+  stopSessionOnPoseTrackerFailure,
+  type PoseTrackerFailure,
+} from '@/exercise/pose-tracker-recovery';
 import { createExpoSpeechSink, VoiceFeedbackController } from '@/exercise/voice-feedback';
 import { useTheme } from '@/hooks/use-theme';
 
@@ -39,6 +46,7 @@ export default function SessionScreen() {
   const [seconds, setSeconds] = useState(0);
   const [phase, setPhase] = useState<SessionPhase>('ready');
   const [hasCameraPermission, setHasCameraPermission] = useState<boolean | null>(null);
+  const [trackingFailure, setTrackingFailure] = useState<PoseTrackerFailure | null>(null);
   const [hud, setHud] = useState<HudState>({
     reps: 0,
     feedback: setupFeedback(),
@@ -77,6 +85,12 @@ export default function SessionScreen() {
   const [engine] = useState<SessionEngine | null>(() =>
     config === undefined ? null : new SessionEngine(config),
   );
+  const [failureGate] = useState(() => new PoseTrackerFailureGate());
+
+  useEffect(() => {
+    failureGate.activate();
+    return () => failureGate.deactivate();
+  }, [failureGate]);
 
   /**
    * Voice is a second channel for the SAME per-frame decision the HUD renders,
@@ -114,7 +128,15 @@ export default function SessionScreen() {
   const leaveSession = () => {
     if (leavingRef.current) return;
     leavingRef.current = true;
+    failureGate.deactivate();
     router.replace('/');
+  };
+
+  const exitFailedSession = () => {
+    if (leavingRef.current) return;
+    leavingRef.current = true;
+    failureGate.deactivate();
+    router.replace('/exercise');
   };
 
   const requestCameraPermission = useCallback(async () => {
@@ -187,6 +209,21 @@ export default function SessionScreen() {
     [engine, updateHud],
   );
 
+  const handleTrackerError = useCallback(
+    (event: { nativeEvent: PoseTrackerErrorPayload }) => {
+      if (leavingRef.current || phaseRef.current === 'completed' || phaseRef.current === 'tracking-error') return;
+      const failure = stopSessionOnPoseTrackerFailure(failureGate, event.nativeEvent, engine);
+      if (failure === null) return;
+
+      // end() is terminal and freezes active time/reps immediately. The error
+      // phase also drops any queued native frames before they reach the engine.
+      setTrackingFailure(failure);
+      setSeconds(engine?.elapsedSeconds ?? 0);
+      goToPhase('tracking-error');
+    },
+    [engine, failureGate, goToPhase],
+  );
+
   if (!exercise || config === undefined) {
     return (
       <Screen>
@@ -238,7 +275,7 @@ export default function SessionScreen() {
   const end = () => {
     // COMPLETED is terminal: a second End (double tap, or back-navigation from
     // the result screen) must not push a duplicate result or re-open counting.
-    if (phaseRef.current === 'completed') return;
+    if (phaseRef.current === 'completed' || phaseRef.current === 'tracking-error') return;
 
     const range = engine?.observedRange ?? null;
 
@@ -256,52 +293,35 @@ export default function SessionScreen() {
 
     // Stop counting and freeze the final numbers before navigating away, so no
     // pose frame can mutate the metrics that were just handed to the result.
+    failureGate.deactivate();
     engine?.end();
     goToPhase('completed');
     // Announced before navigating. The controller is terminal from here, so this
     // is the last thing ever spoken for this session.
     voiceRef.current?.announceCompletion(metrics.reps);
 
-    /*
-     * Record the finished session so it can be seen again from the home screen.
-     *
-     * THIS IS THE ONLY PLACE A SESSION IS SAVED, and it sits below the terminal
-     * guard at the top of this function, so every way of arriving twice is
-     * already covered: a double tap on End returns early, a re-render does not
-     * re-run this callback, back-navigation from the result screen finds
-     * `phaseRef.current` already 'completed', and the result screen itself never
-     * saves. The store also replaces rather than appends on a repeated id, so
-     * even a re-entrant call could not produce a duplicate.
-     *
-     * The RAW metrics are stored, not the formatted strings below, so nothing
-     * display-shaped is written to disk and the history can be re-rendered at any
-     * text size without a re-save.
-     *
-     * Fire-and-forget, deliberately. A slow or failing write must not delay the
-     * result screen, and the result screen reads the same numbers from the route
-     * params whether or not the write landed. The rejection is absorbed for the
-     * same reason the voice controller absorbs its own: the session really did
-     * happen and the user really did get their result, so a storage failure
-     * degrades the history list rather than the session.
-     */
-    void sessionStore
-      .saveSession(
-        createSessionRecord({
-          id: createSessionId(),
-          exerciseId: exercise.id,
-          exerciseName: exercise.name,
-          completedAt: new Date().toISOString(),
-          metrics,
-        }),
-      )
-      .catch(() => {
-        // Intentionally swallowed â€” see above.
-      });
+    // Record the finished session so it can be seen again from the home screen.
+    // This is the only save site and it remains below the terminal guard, so an
+    // End double-tap cannot create duplicate records. The raw metrics are stored
+    // rather than their display labels.
+    const recordId = createSessionId();
+    const record = createSessionRecord({
+      id: recordId,
+      exerciseId: exercise.id,
+      exerciseName: exercise.name,
+      completedAt: new Date().toISOString(),
+      metrics,
+    });
+
+    // The tracker absorbs write failures and exposes the eventual outcome to the
+    // result screen. Navigation stays immediate even if local storage is slow.
+    void sessionSaveStatusTracker.track(recordId, () => sessionStore.saveSession(record));
 
     router.push({
       pathname: '/exercise/result',
       params: {
         id: exercise.id,
+        recordId,
         reps: String(metrics.reps),
         duration: formatDurationLabel(metrics.durationSeconds),
         pace: formatPaceLabel(metrics.paceRpm),
@@ -317,7 +337,13 @@ export default function SessionScreen() {
   // The HUD states the phase in words rather than relying on the chip, a colour,
   // or the timer â€” none of which are readable from across a room.
   const phaseBanner =
-    phase === 'paused' ? 'PAUSED' : phase === 'completed' ? 'SESSION COMPLETE' : null;
+    phase === 'paused'
+      ? 'PAUSED'
+      : phase === 'completed'
+        ? 'SESSION COMPLETE'
+        : phase === 'tracking-error'
+          ? 'TRACKING STOPPED'
+          : null;
 
   // Paused and completed get fixed wording so a stale exercise cue can never be
   // left standing on screen; while running, the engine's own cue is the truth.
@@ -326,7 +352,9 @@ export default function SessionScreen() {
       ? completedFeedback().text
       : phase === 'paused'
         ? pausedFeedback().text
-        : hud.feedback.text;
+        : phase === 'tracking-error'
+          ? 'Pose tracking stopped.'
+          : hud.feedback.text;
 
    return (
     <Screen contentStyle={styles.content}>
@@ -342,7 +370,7 @@ export default function SessionScreen() {
         the preview, and the tracker keeps its own full-width 1:1 frame.
       */}
       {hasCameraPermission ? (
-        <View style={styles.cameraFrame}>
+        <View style={[styles.cameraFrame, { backgroundColor: theme.cameraSurface }]}>
           {/*
             The tracker is unmounted once the session is over. The result screen
             is PUSHED, so this screen stays mounted behind it â€” and the native
@@ -351,17 +379,38 @@ export default function SessionScreen() {
             would keep the camera indicator lit and burn CPU on pose inference
             for the whole time the result screen is open.
           */}
-          {phase === 'completed' ? null : (
+          {phase === 'completed' || phase === 'tracking-error' ? null : (
             <PoseTrackerView
               style={styles.camera}
               onFrame={handleFrame}
               onPoseFrame={handlePoseFrame}
+              onError={handleTrackerError}
             />
           )}
         </View>
       ) : (
         <CameraPlaceholder />
       )}
+
+      {phase === 'tracking-error' && trackingFailure ? (
+        <Card
+          variant="surface"
+          padding="medium"
+          style={[styles.instructions, { backgroundColor: theme.dangerSoft, borderColor: theme.danger }]}>
+          <Text style={[styles.instructionsTitle, { color: theme.danger }]}>Tracking stopped</Text>
+          <Text
+            accessibilityRole="alert"
+            accessibilityLiveRegion="assertive"
+            style={[styles.instructionStep, { color: theme.danger }]}>
+            {trackingFailure.message} No session record will be saved.
+          </Text>
+          <Button variant="primary" title="Return to exercises" onPress={exitFailedSession} />
+        </Card>
+      ) : null}
+
+      {phase === 'ready' && hasCameraPermission === false ? (
+        <Button variant="outline" title="Back to exercises" onPress={exitFailedSession} />
+      ) : null}
 
       {/*
         Guidance lives below the camera instead of over the video: the phase
@@ -384,12 +433,12 @@ export default function SessionScreen() {
         </View>
       )}
 
-      {phase !== 'ready' && (
+      {phase !== 'ready' && phase !== 'tracking-error' && (
         <Card variant="surface" padding="medium" style={styles.instructions}>
           <Text style={[styles.instructionsTitle, { color: theme.heading }]}>Instructions</Text>
           {exercise.instructions.map((instruction, index) => (
             <View key={index} style={styles.instructionItem}>
-              <Text style={[styles.instructionBullet, { color: theme.accent }]}>â€¢</Text>
+              <Text style={[styles.instructionBullet, { color: theme.accentStrong }]}>â€¢</Text>
               <Text style={[styles.instructionStep, { color: theme.text }]}>{instruction}</Text>
             </View>
           ))}
@@ -401,7 +450,7 @@ export default function SessionScreen() {
           <Text style={[styles.instructionsTitle, { color: theme.heading }]}>Instructions</Text>
           {exercise.instructions.map((instruction, index) => (
             <View key={index} style={styles.instructionItem}>
-              <Text style={[styles.instructionBullet, { color: theme.accent }]}>â€¢</Text>
+              <Text style={[styles.instructionBullet, { color: theme.accentStrong }]}>â€¢</Text>
               <Text style={[styles.instructionStep, { color: theme.text }]}>{instruction}</Text>
             </View>
           ))}
@@ -418,7 +467,7 @@ export default function SessionScreen() {
       */}
       {phase === 'completed' ? (
         <Button variant="primary" title="Done" onPress={leaveSession} />
-      ) : phase === 'ready' ? (
+      ) : phase === 'tracking-error' ? null : phase === 'ready' ? (
         // Start is only offered once the camera is actually available. Without
         // it there are no pose frames, so a session could be "completed" with 0
         // reps and report success for a workout that was never tracked. While
@@ -464,7 +513,6 @@ const styles = StyleSheet.create({
     aspectRatio: 1,
     borderRadius: Radius.card,
     overflow: 'hidden',
-    backgroundColor: '#202522',
   },
   camera: {
     position: 'absolute',

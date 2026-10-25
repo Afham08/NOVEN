@@ -14,6 +14,7 @@ const { resolve } = require('node:path');
 import { check, suite } from './harness';
 
 import { SEATED_KNEE_EXTENSION } from '../src/exercise/configs';
+import { SessionSaveStatusTracker, type SessionHistorySaveStatus } from '../src/exercise/session-save-status';
 import type { SessionMetrics } from '../src/exercise/types';
 import {
   buildSessionMetrics,
@@ -81,6 +82,45 @@ function buildResultParams(
 }
 
 export function run(): void {
+  suite('exercise history save status: pending writes report success or failure', async () => {
+    const tracker = new SessionSaveStatusTracker();
+    const successfulStatuses: SessionHistorySaveStatus[] = [];
+    tracker.subscribe('saved-record', (status) => successfulStatuses.push(status));
+
+    let resolveSave!: () => void;
+    const pendingSave = new Promise<void>((resolvePromise) => {
+      resolveSave = resolvePromise;
+    });
+    const trackedSave = tracker.track('saved-record', () => pendingSave);
+    check('a pending write is exposed as saving', successfulStatuses[0] === 'saving');
+    resolveSave();
+    await trackedSave;
+    check('a fulfilled write is exposed as saved', successfulStatuses[1] === 'saved');
+
+    const failedStatuses: SessionHistorySaveStatus[] = [];
+    tracker.subscribe('failed-record', (status) => failedStatuses.push(status));
+    await tracker.track('failed-record', () => Promise.reject(new Error('storage unavailable')));
+    check('a rejected write does not reject the tracker', failedStatuses[0] === 'saving');
+    check('a rejected write is exposed as failed', failedStatuses[1] === 'failed');
+  });
+
+  suite('exercise result: history save status is carried to accessible result feedback', () => {
+    const sessionSource = readFileSync(resolve(__dirname, '../../src/app/exercise/session.tsx'), 'utf8');
+    const resultSource = readFileSync(resolve(__dirname, '../../src/app/exercise/result.tsx'), 'utf8');
+
+    check('the session starts a tracked history write', sessionSource.includes('sessionSaveStatusTracker.track(recordId'));
+    check('the session passes its record id to the result route', /pathname: '\/exercise\/result',[\s\S]*?recordId,/.test(sessionSource));
+    check('the result screen subscribes to that record status', resultSource.includes('sessionSaveStatusTracker.subscribe(recordId'));
+    check('the result screen announces status changes politely', resultSource.includes('accessibilityLiveRegion="polite"'));
+    check('the result screen shows a saved confirmation', resultSource.includes('Saved to your session history.'));
+    check('the result screen explains a failed save without claiming history exists',
+      resultSource.includes('Could not save this session to your history.') &&
+        resultSource.includes('this session will not appear in History.'));
+    check('result navigation does not wait for the storage promise',
+      sessionSource.indexOf('sessionSaveStatusTracker.track(recordId') <
+        sessionSource.indexOf("pathname: '/exercise/result'"));
+  });
+
   suite('result routing: non-ASCII params survive the router round trip', () => {
     const { params } = buildResultParams(4, 95, [40, 42, 38, 41], 88.4, 169.7);
 

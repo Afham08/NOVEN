@@ -112,7 +112,9 @@ export function run(): void {
         name,
         found: Object.keys(colours),
       });
-      for (const token of ['text', 'backgroundElement', 'accent', 'accentSecondary', 'onAccent']) {
+      for (const token of [
+        'text', 'backgroundElement', 'accentStrong', 'accentSecondary', 'onAccent', 'danger', 'onDanger',
+      ]) {
         check(`the ${name} palette defines ${token}`, colours[token] !== undefined, name);
       }
     }
@@ -191,36 +193,41 @@ export function run(): void {
     );
 
     for (const [name, colours] of Object.entries(bothPalettes)) {
-      // Outline keeps the surface and draws its label in the accent token.
+      // Outline keeps the surface and draws its label in the stronger semantic accent token.
       check(
         `an outline label is readable in ${name}`,
-        contrast(colours.accent, colours.backgroundElement) >= LARGE_TEXT_MINIMUM,
+        contrast(colours.accentStrong, colours.backgroundElement) >= LARGE_TEXT_MINIMUM,
         {
-          ratio: contrast(colours.accent, colours.backgroundElement),
+          ratio: contrast(colours.accentStrong, colours.backgroundElement),
         },
       );
       /*
-       * The filled variants keep white on their own accent, which is what makes
-       * them legible and is asserted structurally rather than against a contrast
-       * floor: `secondary` in the dark palette is 2.7:1, a pre-existing shortfall
-       * that belongs to the palette rather than to this component, so pinning a
-       * number here would only fail on something this change did not touch.
+       * Filled variants choose their foreground and fill from matching semantic
+       * roles. Light uses white on the darker accent; Dark uses charcoal on the
+       * existing bright accent. Both are checked by the same contrast threshold.
        */
       check(
-        `a primary label is white on the accent, not on itself, in ${name}`,
-        colours.onAccent !== colours.accent,
-        { onAccent: colours.onAccent, accent: colours.accent },
+        `a primary label is readable on its own accent in ${name}`,
+        contrast(colours.onAccent, colours.accentStrong) >= BODY_MINIMUM,
+        { onAccent: colours.onAccent, accentStrong: colours.accentStrong },
       );
       check(
-        `a secondary label is white on the secondary accent, not on itself, in ${name}`,
-        colours.onAccent !== colours.accentSecondary,
+        `a secondary label is readable on the secondary accent in ${name}`,
+        contrast(colours.onAccent, colours.accentSecondary) >= BODY_MINIMUM,
         { onAccent: colours.onAccent, accentSecondary: colours.accentSecondary },
+      );
+      check(
+        `a destructive label is readable on danger in ${name}`,
+        contrast(colours.onDanger, colours.danger) >= BODY_MINIMUM,
+        { onDanger: colours.onDanger, danger: colours.danger },
       );
     }
 
     check(
       'the filled variants keep their own backgrounds',
-      /theme\.accent/.test(background) && /theme\.accentSecondary/.test(background),
+      /theme\.accentStrong/.test(background) &&
+        /theme\.accentSecondary/.test(background) &&
+        /theme\.danger/.test(background),
       background,
     );
   });
@@ -229,7 +236,7 @@ export function run(): void {
     const border = assignment(buttonSource, 'border');
 
     check('outline draws a border', /borderWidth/.test(border), border);
-    check('the border uses the accent token', /borderColor:\s*theme\.accent/.test(border), border);
+    check('the border uses the semantic accent token', /borderColor:\s*theme\.accentStrong/.test(border), border);
 
     // The bug: outline shared the ghost/secondary fill instead of the surface.
     const background = assignment(buttonSource, 'background');

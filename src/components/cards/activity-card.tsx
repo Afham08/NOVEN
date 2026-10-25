@@ -56,7 +56,7 @@ export function ActivityCard({
         {meta ? <Text style={[styles.meta, { color: theme.accentSecondary }]}>{meta}</Text> : null}
       </View>
       {rightLabel ? (
-        <Text style={[styles.rightLabel, { color: theme.accent }]}>{rightLabel}</Text>
+        <Text style={[styles.rightLabel, { color: theme.accentStrong }]}>{rightLabel}</Text>
       ) : null}
     </Pressable>
   );

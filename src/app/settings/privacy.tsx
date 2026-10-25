@@ -118,7 +118,7 @@ export default function PrivacySafetyScreen() {
           }
         />
         <Button
-          variant="outline"
+          variant="destructive"
           title="Delete all saved sessions"
           loading={clearing}
           disabled={count === null || count === 0}

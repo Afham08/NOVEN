@@ -11,6 +11,7 @@ import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Wraps the MediaPipe Tasks `PoseLandmarker` in LIVE_STREAM mode.
@@ -30,12 +31,15 @@ import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
  */
 class PoseTrackerProcessor(
   private val context: Context,
-  private val onPoseFrame: (PoseFrameEvent) -> Unit
+  private val onPoseFrame: (PoseFrameEvent) -> Unit,
+  private val onFatalError: (PoseTrackerErrorEvent) -> Unit
 ) {
   private var poseLandmarker: PoseLandmarker? = null
   private var lastTimestampMs = -1L
   private var lastEmitAtMs = 0L
-  private var closed = false
+  private var consecutiveSubmitFailures = 0
+  @Volatile private var closed = false
+  private val failureReported = AtomicBoolean(false)
 
   fun initialize() {
     if (closed) {
@@ -47,7 +51,10 @@ class PoseTrackerProcessor(
     poseLandmarker = createPoseLandmarker(Delegate.GPU) ?: createPoseLandmarker(Delegate.CPU)
 
     if (poseLandmarker == null) {
-      Log.e(TAG, "PoseLandmarker could not be initialized with GPU or CPU delegate. Pose events disabled.")
+      reportFatalFailure(
+        category = "pose-initialization",
+        message = "Pose tracking could not start. Return to exercises and reopen the session."
+      )
     } else {
       Log.i(TAG, "PoseLandmarker initialized in LIVE_STREAM mode.")
     }
@@ -95,18 +102,47 @@ class PoseTrackerProcessor(
     // LIVE_STREAM requires strictly increasing timestamps across calls.
     val timestampMs = nextTimestampMs(captureTimestampNs)
 
-    val bitmap = imageProxy.toRotatedBitmap(rotationDegrees)
+    val bitmap = try {
+      imageProxy.toRotatedBitmap(rotationDegrees)
+    } catch (e: Exception) {
+      imageProxy.close()
+      Log.e(TAG, "Could not prepare a camera frame for pose tracking.", e)
+      reportFatalFailure(
+        category = "pose-runtime",
+        message = "Pose tracking stopped unexpectedly. Return to exercises and reopen the session."
+      )
+      return
+    }
     imageProxy.close()
 
     if (bitmap == null) return
 
-    val mpImage = BitmapImageBuilder(bitmap).build()
+    val mpImage = try {
+      BitmapImageBuilder(bitmap).build()
+    } catch (e: Exception) {
+      Log.e(TAG, "Could not create a MediaPipe image for pose tracking.", e)
+      reportFatalFailure(
+        category = "pose-runtime",
+        message = "Pose tracking stopped unexpectedly. Return to exercises and reopen the session."
+      )
+      return
+    }
     try {
       landmarker.detectAsync(mpImage, timestampMs)
+      consecutiveSubmitFailures = 0
     } catch (e: Exception) {
-      // A previous inference may still be in flight; drop this frame.
+      // One rejected submission can be transient while LIVE_STREAM inference is
+      // in flight. Repeated consecutive failures mean this tracker is no longer
+      // accepting frames, so stop silently dropping them and report once.
+      consecutiveSubmitFailures += 1
       Log.w(TAG, "detectAsync skipped: ${e.message}")
       mpImage.close()
+      if (consecutiveSubmitFailures >= MAX_CONSECUTIVE_SUBMIT_FAILURES) {
+        reportFatalFailure(
+          category = "pose-runtime",
+          message = "Pose tracking stopped unexpectedly. Return to exercises and reopen the session."
+        )
+      }
     }
   }
 
@@ -122,11 +158,18 @@ class PoseTrackerProcessor(
 
   private fun onDetectResult(result: PoseLandmarkerResult, input: MPImage) {
     try {
+      if (closed || failureReported.get()) return
       val nowMs = SystemClock.elapsedRealtime()
       if (nowMs - lastEmitAtMs >= POSE_EMIT_INTERVAL_MS) {
         lastEmitAtMs = nowMs
         onPoseFrame(NovenPoseAdapter.toPoseFrameEvent(result, input.width, input.height))
       }
+    } catch (e: Exception) {
+      Log.e(TAG, "Could not process MediaPipe pose results.", e)
+      reportFatalFailure(
+        category = "pose-runtime",
+        message = "Pose tracking stopped unexpectedly. Return to exercises and reopen the session."
+      )
     } finally {
       input.close()
     }
@@ -134,6 +177,19 @@ class PoseTrackerProcessor(
 
   private fun onDetectError(error: RuntimeException) {
     Log.e(TAG, "PoseLandmarker runtime error: ${error.message}")
+    reportFatalFailure(
+      category = "pose-runtime",
+      message = "Pose tracking stopped unexpectedly. Return to exercises and reopen the session."
+    )
+  }
+
+  private fun reportFatalFailure(category: String, message: String) {
+    if (closed || !failureReported.compareAndSet(false, true)) return
+    try {
+      onFatalError(PoseTrackerErrorEvent(category, message))
+    } catch (e: Exception) {
+      Log.e(TAG, "Could not deliver pose-tracker failure to the native view.", e)
+    }
   }
 
   fun close() {
@@ -161,5 +217,6 @@ class PoseTrackerProcessor(
     const val MODEL_ASSET = "pose_landmarker_lite.task"
     const val NANOS_PER_MILLIS = 1_000_000L
     const val POSE_EMIT_INTERVAL_MS = 100L
+    const val MAX_CONSECUTIVE_SUBMIT_FAILURES = 3
   }
 }

@@ -1,8 +1,9 @@
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { useColorScheme } from 'react-native';
+import { StatusBar, useColorScheme } from 'react-native';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
+import { Colors } from '@/constants/theme';
 import { ThemePreferenceProvider, useThemePreference } from '@/hooks/use-theme-preference';
 
 SplashScreen.preventAutoHideAsync();
@@ -37,11 +38,31 @@ function RootNavigator() {
    * `useTheme`: a chosen palette wins, and 'system' defers to the phone. Without
    * this the header and the page beneath it could disagree — a light page under
    * a dark header, or a status bar whose colour fights the content behind it.
-   */
+  */
   const effectiveScheme = preference === 'system' ? colorScheme : preference;
+  const isDark = effectiveScheme === 'dark';
+  const palette = isDark ? Colors.dark : Colors.light;
+  const baseNavigationTheme = isDark ? DarkTheme : DefaultTheme;
+  const navigationTheme = {
+    ...baseNavigationTheme,
+    dark: isDark,
+    colors: {
+      ...baseNavigationTheme.colors,
+      primary: palette.accentStrong,
+      background: palette.background,
+      card: palette.backgroundElement,
+      text: palette.text,
+      border: palette.border,
+      notification: palette.danger,
+    },
+  };
 
   return (
-    <ThemeProvider value={effectiveScheme === 'dark' ? DarkTheme : DefaultTheme}>
+    <ThemeProvider value={navigationTheme}>
+      <StatusBar
+        barStyle={isDark ? 'light-content' : 'dark-content'}
+        backgroundColor={palette.background}
+      />
       <AnimatedSplashOverlay />
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />

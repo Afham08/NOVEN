@@ -71,6 +71,9 @@ export default function ActivityResultScreen() {
   const runSeconds = Math.min(elapsedSeconds, activity.durationSeconds);
   const ranToTheEnd = done === totalSteps;
   const stopped = how === 'stopped';
+  const saveStatus = parseSaveStatusParam(saved);
+  const saveStatusColor =
+    saveStatus === 'saved' ? theme.success : saveStatus === 'failed' ? theme.danger : theme.heading;
 
   return (
     <Screen>
@@ -85,10 +88,10 @@ export default function ActivityResultScreen() {
           accessibilityLabel={`${done} of ${totalSteps} ${activity.progressNoun} completed`}>
           <Text
             maxFontSizeMultiplier={1.6}
-            style={[styles.heroNumber, { color: theme.accent }]}>
+            style={[styles.heroNumber, { color: theme.accentOnInverse }]}>
             {`${done}/${totalSteps}`}
           </Text>
-          <Text style={[styles.heroLabel, { color: 'rgba(250, 249, 246, 0.78)' }]}>
+          <Text style={[styles.heroLabel, { color: theme.onInverseSecondary }]}>
             {activity.progressNoun} completed
           </Text>
         </View>
@@ -106,7 +109,8 @@ export default function ActivityResultScreen() {
         <InfoRow
           stacked
           label="Saved to your history"
-          value={describeSaveStatus(parseSaveStatusParam(saved), ranToTheEnd, stopped)}
+          value={describeSaveStatus(saveStatus, ranToTheEnd, stopped)}
+          valueColor={saveStatusColor}
         />
       </Card>
 

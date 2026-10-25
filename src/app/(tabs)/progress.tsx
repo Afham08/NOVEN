@@ -6,6 +6,7 @@ import { ProgressSection } from '@/components/progress/progress-section';
 import { SessionHistory } from '@/components/session/session-history';
 import { Header } from '@/components/ui/header';
 import { SectionHeader } from '@/components/ui/section-header';
+import { SessionHistoryLoadNotice } from '@/components/session/session-history-load-notice';
 import { useProgress } from '@/hooks/use-progress';
 import { formatConsistencyLabel, formatDurationLabel, formatPaceLabel, formatRangeLabel } from '@/exercise/metrics';
 import { progressHint } from '@/exercise/progress';
@@ -22,7 +23,7 @@ import { sessionStore } from '@/exercise/session-storage';
  */
 export default function ProgressScreen() {
   const router = useRouter();
-  const { summary, totalSessions, records } = useProgress(sessionStore);
+  const { summary, totalSessions, records, issue, retry } = useProgress(sessionStore);
 
   /**
    * Reopening a past session reuses the existing result screens exactly as they
@@ -72,8 +73,10 @@ export default function ProgressScreen() {
       */}
       <Header eyebrow="NOVEN" title="Your progress" />
 
+      {issue ? <SessionHistoryLoadNotice issue={issue} onRetry={retry} /> : null}
+
       <ScoreCard
-        variant="inverse"
+        variant="surface"
         emphasis="sage"
         score={summary?.latest?.score}
         label="Progress score"
@@ -90,7 +93,12 @@ export default function ProgressScreen() {
       */}
       {/* No subtitle: the list's own empty state already explains itself. */}
       <SectionHeader accent title="All your sessions" />
-      <SessionHistory store={sessionStore} onOpenSession={openSession} limit={20} />
+      <SessionHistory
+        store={sessionStore}
+        onOpenSession={openSession}
+        limit={20}
+        loadedRecords={records}
+      />
     </Screen>
   );
 }

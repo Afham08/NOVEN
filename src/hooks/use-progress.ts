@@ -1,8 +1,8 @@
 import { useFocusEffect } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 import { buildProgress, type ProgressSummary } from '@/exercise/progress';
-import type { SessionRecord, SessionStore } from '@/exercise/session-store';
+import type { SessionHistoryLoadIssue, SessionRecord, SessionStore } from '@/exercise/session-store';
 
 export type ProgressState = {
   /** Null until the first read finishes, so nothing false is shown while loading. */
@@ -16,6 +16,10 @@ export type ProgressState = {
    * agreeing with everything else.
    */
   records: SessionRecord[] | null;
+  /** Null on a complete read, otherwise identifies the unavailable/corrupt history. */
+  issue: SessionHistoryLoadIssue | null;
+  /** Repeats the detailed read while this screen is focused. */
+  retry: () => void;
 };
 
 /**
@@ -32,23 +36,48 @@ export function useProgress(store: SessionStore): ProgressState {
   const [summary, setSummary] = useState<ProgressSummary | null>(null);
   const [totalSessions, setTotalSessions] = useState<number | null>(null);
   const [records, setRecords] = useState<SessionRecord[] | null>(null);
+  const [issue, setIssue] = useState<SessionHistoryLoadIssue | null>(null);
+  const retryLoader = useRef<(() => void) | null>(null);
+  const retry = useCallback(() => retryLoader.current?.(), []);
 
   useFocusEffect(
     useCallback(() => {
-      // A read failure resolves to an empty list inside the store, so there is
-      // no error branch to handle here: the empty state is the honest answer.
       let active = true;
-      void store.getSessions().then((next) => {
-        if (!active) return;
-        setRecords(next);
-        setSummary(buildProgress(next));
-        setTotalSessions(next.length);
-      });
+      let request = 0;
+      const load = () => {
+        const currentRequest = ++request;
+        void Promise.resolve()
+          .then(() => store.getSessionsResult())
+          .then((result) => {
+            if (!active || currentRequest !== request) return;
+            if (result.status === 'error') {
+              setRecords(null);
+              setSummary(null);
+              setTotalSessions(null);
+              setIssue(result.issue);
+              return;
+            }
+            setRecords(result.records);
+            setSummary(buildProgress(result.records));
+            setTotalSessions(result.records.length);
+            setIssue(result.status === 'partial' ? result.issue : null);
+          })
+          .catch(() => {
+            if (!active || currentRequest !== request) return;
+            setRecords(null);
+            setSummary(null);
+            setTotalSessions(null);
+            setIssue({ kind: 'storage', partial: false });
+          });
+      };
+      retryLoader.current = load;
+      load();
       return () => {
         active = false;
+        if (retryLoader.current === load) retryLoader.current = null;
       };
     }, [store]),
   );
 
-  return { summary, totalSessions, records };
+  return { summary, totalSessions, records, issue, retry };
 }

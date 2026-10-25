@@ -83,7 +83,7 @@ export function ProgressChart({ points, startLabel, endLabel }: ProgressChartPro
                   top: segment.top,
                   width: segment.width,
                   height: segment.height,
-                  backgroundColor: theme.accent,
+                  backgroundColor: theme.accentStrong,
                   transform: [{ rotate: `${segment.angle}deg` }],
                 },
               ]}
@@ -101,7 +101,7 @@ export function ProgressChart({ points, startLabel, endLabel }: ProgressChartPro
                   width: CHART_DOT,
                   height: CHART_DOT,
                   borderRadius: CHART_DOT / 2,
-                  backgroundColor: theme.accent,
+                  backgroundColor: theme.accentStrong,
                   borderColor: theme.backgroundElement,
                 },
               ]}

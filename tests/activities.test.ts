@@ -426,7 +426,9 @@ export function run(): void {
         ...(stepsCompleted !== undefined ? { stepsCompleted } : {}),
       });
       const stored = await store.saveSession(record);
-      const readBack = await store.getSessions();
+      // A fresh store forces a real JSON read/parse instead of consulting the
+      // writer's in-memory cache.
+      const readBack = await createSessionStore(backend).getSessions();
       return { stored, records: readBack };
     }
 
@@ -442,8 +444,10 @@ export function run(): void {
     // CASE B — the critical one: the person tapped End part way through.
     const partial = runThenEnd(activity.steps[0].seconds + 2);
     check('ending early really does record fewer steps', partial.stepsCompleted > 0 && partial.stepsCompleted < total, `${partial.stepsCompleted}/${total}`);
+    check('ending early closes the session without completing the activity', partial.finished && partial.stepsCompleted < total, partial);
     const partialWrite = await persist(partial.stepsCompleted, todayNoon);
     check('a partial run is still stored as a session', partialWrite.records.length === 1, partialWrite.records);
+    check('the partial step count survives a fresh-store reload', partialWrite.records[0]?.stepsCompleted === partial.stepsCompleted, partialWrite.records[0]);
     const partialToday = todayStatus(partialWrite.records, BY_KIND.wellness, 'wellness', now);
     check(
       'CASE B: a session that stopped short is NOT done today',
@@ -497,6 +501,111 @@ export function run(): void {
       countDoneToday(todayStatus(legacyWrite.records, BY_KIND.wellness, 'wellness', now)).done >= 1,
       legacyWrite.records,
     );
+  });
+
+  suite('today: repeated Wellness sessions survive reload without double-counting activities', async () => {
+    const activity = BY_KIND.wellness[0];
+    if (activity === undefined || activity.steps.length === 0) throw new Error('need a Wellness activity with steps');
+
+    const local = (day: number, hour: number) => new Date(2026, 8, day, hour, 0, 0, 0);
+    const metrics = buildSessionMetrics({
+      reps: 0,
+      durationSeconds: 60,
+      repRanges: [],
+      rangeMinDeg: null,
+      rangeMaxDeg: null,
+    });
+    const makeRecord = (id: string, completedAt: Date, stepsCompleted = activity.steps.length) =>
+      createSessionRecord({
+        id,
+        exerciseId: activity.id,
+        exerciseName: activity.name,
+        completedAt: completedAt.toISOString(),
+        metrics,
+        activityKind: 'wellness',
+        stepsCompleted,
+      });
+
+    const written = new Map<string, string>();
+    const backend: KeyValueStore = {
+      getItem: async (key) => written.get(key) ?? null,
+      setItem: async (key, value) => { written.set(key, value); },
+      removeItem: async (key) => { written.delete(key); },
+    };
+    const store = createSessionStore(backend);
+    const morning = makeRecord('morning', local(28, 9));
+    const partial = makeRecord('partial', local(28, 12), activity.steps.length - 1);
+    const evening = makeRecord('evening', local(28, 18));
+
+    await store.saveSession(morning);
+    await store.saveSession(partial);
+    await store.saveSession(evening);
+    // A retry of the same session id replaces that row instead of duplicating it.
+    await store.saveSession(morning);
+
+    const reloaded = await createSessionStore(backend).getSessions();
+    const ids = reloaded.map((record) => record.id);
+    check('both distinct completed sessions and the partial session survive JSON reload', reloaded.length === 3, ids);
+    check('unique sessions are not merged or lost',
+      ids.includes('morning') && ids.includes('evening') && ids.includes('partial') && new Set(ids).size === 3,
+      ids);
+    check('retrying one id does not duplicate it', ids.filter((id) => id === 'morning').length === 1, ids);
+    check('the partial run remains stored but retains its incomplete step count',
+      reloaded.find((record) => record.id === 'partial')?.stepsCompleted === activity.steps.length - 1,
+      reloaded.find((record) => record.id === 'partial'));
+
+    const now = local(28, 20);
+    const status = todayStatus(reloaded, [activity], 'wellness', now);
+    const withoutPartial = todayStatus(reloaded.filter((record) => record.id !== 'partial'), [activity], 'wellness', now);
+    check('two complete sessions on one local day are both reflected in timesToday', status[0]?.timesToday === 2, status);
+    check('the partial session does not increment the completion count',
+      status[0]?.timesToday === withoutPartial[0]?.timesToday,
+      { withPartial: status[0]?.timesToday, withoutPartial: withoutPartial[0]?.timesToday });
+    check('the once-per-day Wellness summary counts the activity once, not once per session',
+      countDoneToday(status).done === 1 && countDoneToday(status).total === 1,
+      countDoneToday(status));
+  });
+
+  suite('today: Wellness grouping follows local calendar boundaries around midnight', () => {
+    const activity = BY_KIND.wellness[0];
+    if (activity === undefined || activity.steps.length === 0) throw new Error('need a Wellness activity with steps');
+
+    // Construct local wall times explicitly and persist their ISO instants. No
+    // current date or fixed UTC offset is assumed by these boundary assertions.
+    const local = (day: number, hour: number, minute = 0, second = 0, ms = 0) =>
+      new Date(2026, 8, day, hour, minute, second, ms);
+    const metrics = buildSessionMetrics({
+      reps: 0,
+      durationSeconds: 60,
+      repRanges: [],
+      rangeMinDeg: null,
+      rangeMaxDeg: null,
+    });
+    const recordAt = (id: string, completedAt: Date): SessionRecord =>
+      createSessionRecord({
+        id,
+        exerciseId: activity.id,
+        exerciseName: activity.name,
+        completedAt: completedAt.toISOString(),
+        metrics,
+        activityKind: 'wellness',
+        stepsCompleted: activity.steps.length,
+      });
+
+    const records = [
+      recordAt('before-midnight', local(27, 23, 59, 59, 999)),
+      recordAt('at-midnight', local(28, 0, 0, 0, 0)),
+      recordAt('before-next-midnight', local(28, 23, 59, 59, 999)),
+      recordAt('at-next-midnight', local(29, 0, 0, 0, 0)),
+    ];
+
+    const onSeptember28 = todayStatus(records, [activity], 'wellness', local(28, 12))[0];
+    check('the instant before midnight belongs to the previous local day',
+      todayStatus(records, [activity], 'wellness', local(27, 12))[0]?.timesToday === 1);
+    check('midnight starts the next local day', onSeptember28?.timesToday === 2, onSeptember28);
+    check('the instant before the following midnight stays in that local day', onSeptember28?.timesToday === 2, onSeptember28);
+    check('the following midnight belongs to the following local day',
+      todayStatus(records, [activity], 'wellness', local(29, 12))[0]?.timesToday === 1);
   });
 
   // ==========================================================================
